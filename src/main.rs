@@ -1,11 +1,18 @@
 use tonic::{transport::Server, Request, Response, Status};
+use tokio::sync::Mutex;
+use std::sync::Arc;
 use futures::Stream;
+use std::fmt::format;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio::sync::mpsc;
-use log::{info, warn};
+use log::{error, info, warn};
+use reqwest::{Client, StatusCode};
 
 mod repl;
+
+mod config;
+use config::Config;
 
 pub mod pb {
     // tonic::include!("/pb/voip.rs"); // Generated from the proto file
@@ -20,13 +27,43 @@ use pb::voip_server_event::{EventType, EventPayload};
 type ServerEventStream = Pin<Box<dyn Stream<Item = Result<VoipServerEvent, Status>> + Send>>;
 
 // Main service struct.
-#[derive(Debug, Default)]
-pub struct MyVoipService {}
+pub struct MyVoipService {
+    // Handle to a config object.
+    config: Config,
+    pub current_user_name: Option<String>,
+    pub current_room: Option<String>,
+    pub call_state: CallState,
+    pub all_member_names: Vec<String>,
+    pub client: Client,
+    pub livekit_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CallState {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+impl Default for MyVoipService {
+    fn default() -> Self {
+        MyVoipService {
+            config: Config::from_env_variables(),
+            current_user_name: None,
+            current_room: None,
+            call_state: CallState::Disconnected,
+            all_member_names: vec![],
+            client: Client::new(),
+            livekit_token: None,
+        }
+    }
+}
 
 #[tonic::async_trait]
 impl VoipService for MyVoipService {
     type RegisterStream = ServerEventStream;
 
+    // TODO: Just a dummy as of now.
     async fn register(
         &self,
         request: Request<ClientInfo>,
@@ -86,22 +123,67 @@ impl VoipService for MyVoipService {
     }
 }
 
+impl MyVoipService {
+    pub async fn connect_to_livekit(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.current_user_name.is_none() || self.current_room.is_none() {
+            warn!("Cannot connect to LiveKit without knowing the user name and room name");
+            return Err("Not logged in to livekit".into());
+        }
+
+        let user_name = self.current_user_name.as_ref().unwrap();
+        let room_name = self.current_room.as_ref().unwrap();
+
+        info!("Fetching join token for self {} in room {}", user_name, room_name);
+
+        let url = reqwest::Url::parse_with_params(&self.config.livekit_token_endpoint, &[("room", room_name), ("identity", user_name)])?;
+
+        info!("Fetching join token from {}", url);
+
+        let resp = self.client.get(url).send().await?;
+        if !matches!(resp.status(), StatusCode::OK) {
+            error!("Failed to get livekit token for room {}. HTTP Error: {}", room_name, resp.status());
+            return Err("Failed to get livekit token".into());
+        }
+
+        let token = resp.text().await?;
+
+        info!("Received token {}", token);
+
+        self.call_state = CallState::Connecting;
+        self.all_member_names = vec![user_name.to_string()];
+        self.livekit_token = Some(token);
+
+        Ok(())
+    }
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tokio::spawn(async {
-        repl::start_repl().await;
+    env_logger::init();
+
+    let voip_service = Arc::new(Mutex::new(MyVoipService::default()));
+
+    // Create a channel to receive shutdown signal from the REPL and close the gRPC server.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn({
+        let voip_service = voip_service.clone();
+        async move {
+            repl::start_repl(voip_service, shutdown_tx).await;
+        }
     });
 
-    // Define the server address.
     let addr = "[::1]:50051".parse().unwrap();
-    let voip_service = MyVoipService::default();
+    let svc = MyVoipService::default();
 
-    println!("Starting voip_service at {}", addr);
+    info!("Starting voip_service at {}", addr);
 
-    // Start the gRPC server.
     Server::builder()
-        .add_service(VoipServiceServer::new(voip_service))
-        .serve(addr)
+        .add_service(VoipServiceServer::new(svc))
+        .serve_with_shutdown(addr, async {
+            shutdown_rx.await.ok();
+        })
         .await?;
 
     Ok(())
