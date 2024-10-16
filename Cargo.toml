@@ -1,0 +1,16 @@
+[package]
+name = "voip_service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures = "0.3.31"
+log = "0.4.22"
+prost = "0.13.3"
+rustyline = "14.0.0"
+tokio = { version = "1.40.0", features = ["full", "rt-multi-thread"] }
+tokio-stream = "0.1.16"
+tonic = "0.12.3"
+
+[build-dependencies]
+tonic-build = "0.12.3"
