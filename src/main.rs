@@ -1,3 +1,4 @@
+use livekit::{Room, RoomEvent, RoomOptions};
 use tonic::{transport::Server, Request, Response, Status};
 use tokio::sync::Mutex;
 use std::sync::Arc;
@@ -31,11 +32,12 @@ pub struct MyVoipService {
     // Handle to a config object.
     config: Config,
     pub current_user_name: Option<String>,
-    pub current_room: Option<String>,
+    pub current_room_name: Option<String>,
     pub call_state: CallState,
     pub all_member_names: Vec<String>,
     pub client: Client,
     pub livekit_token: Option<String>,
+    pub current_room: Option<Arc<Room>>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,11 +52,12 @@ impl Default for MyVoipService {
         MyVoipService {
             config: Config::from_env_variables(),
             current_user_name: None,
-            current_room: None,
+            current_room_name: None,
             call_state: CallState::Disconnected,
             all_member_names: vec![],
             client: Client::new(),
             livekit_token: None,
+            current_room: None,
         }
     }
 }
@@ -125,13 +128,13 @@ impl VoipService for MyVoipService {
 
 impl MyVoipService {
     pub async fn connect_to_livekit(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.current_user_name.is_none() || self.current_room.is_none() {
+        if self.current_user_name.is_none() || self.current_room_name.is_none() {
             warn!("Cannot connect to LiveKit without knowing the user name and room name");
             return Err("Not logged in to livekit".into());
         }
 
         let user_name = self.current_user_name.as_ref().unwrap();
-        let room_name = self.current_room.as_ref().unwrap();
+        let room_name = self.current_room_name.as_ref().unwrap();
 
         info!("Fetching join token for self {} in room {}", user_name, room_name);
 
@@ -150,8 +153,48 @@ impl MyVoipService {
         info!("Received token {}", token);
 
         self.call_state = CallState::Connecting;
+
+        let options = RoomOptions::default();
+        let (room, mut room_events) = Room::connect(
+            &self.config.livekit_endpoint,
+            &token,
+            options,
+        ).await?;
+
+        info!("Connected to LiveKit room {}", room_name);
+
+        // Save the room handle.
+        self.current_room = Some(Arc::new(room));
+        self.call_state = CallState::Connected;
+
         self.all_member_names = vec![user_name.to_string()];
         self.livekit_token = Some(token);
+
+        tokio::spawn(async move {
+            while let Some(event) = room_events.recv().await {
+                match event {
+                    RoomEvent::ParticipantConnected(participant) => {
+                        info!("Participant connected: {}", participant.identity());
+                    }
+
+                    RoomEvent::ActiveSpeakersChanged { speakers } => {
+                        info!("Active speakers changed: {:?}", speakers);
+                    }
+
+                    RoomEvent::ParticipantDisconnected(participant) => {
+                        info!("Participant disconnected: {}", participant.identity());
+                    }
+
+                    RoomEvent::LocalTrackPublished { publication, track, participant } => {
+                        info!("Local track published: {:?}", publication);
+                    }
+
+                    _ => {
+                        info!("Unhandled room event: {:?}", event);
+                    }
+                }
+            }
+        });
 
         Ok(())
     }
