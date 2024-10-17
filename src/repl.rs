@@ -1,10 +1,11 @@
+use crate::MyVoipService;
 use log::info;
-use rustyline::Editor;
+use prettytable::{row, Table};
 use rustyline::history::FileHistory;
-use tokio::sync::Mutex; // Use Tokio's Mutex
+use rustyline::Editor;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use crate::MyVoipService;
+use tokio::sync::Mutex; // Use Tokio's Mutex
 
 pub async fn start_repl(voip_service: Arc<Mutex<MyVoipService>>, shutdown_tx: oneshot::Sender<()>) {
     let mut rl = Editor::<(), FileHistory>::new().unwrap();
@@ -29,7 +30,10 @@ pub async fn start_repl(voip_service: Arc<Mutex<MyVoipService>>, shutdown_tx: on
                         let room_name = service.current_room_name.as_deref().unwrap_or("None");
                         println!(
                             "Current user: {}, Room: {}, Call state: {:?}, Have token: {}",
-                            user_name, room_name, service.call_state, service.livekit_token.is_some()
+                            user_name,
+                            room_name,
+                            service.call_state,
+                            service.livekit_token.is_some()
                         );
                     }
                     "login" => {
@@ -43,7 +47,6 @@ pub async fn start_repl(voip_service: Arc<Mutex<MyVoipService>>, shutdown_tx: on
                             // println!("Logged in as {} in room {}", user, room);
                             info!("Calling connect_to_livekit");
                             service.connect_to_livekit().await;
-
                         } else {
                             println!("Usage: login <username> <room>");
                         }
@@ -52,7 +55,9 @@ pub async fn start_repl(voip_service: Arc<Mutex<MyVoipService>>, shutdown_tx: on
                         let service = voip_service.clone();
                         tokio::spawn(async move {
                             let mut service = service.lock().await;
-                            if service.current_user_name.is_none() || service.current_room_name.is_none() {
+                            if service.current_user_name.is_none()
+                                || service.current_room_name.is_none()
+                            {
                                 println!("Please log in first using the 'login' command.");
                                 return;
                             }
@@ -61,6 +66,50 @@ pub async fn start_repl(voip_service: Arc<Mutex<MyVoipService>>, shutdown_tx: on
                                 println!("Failed to connect: {}", e);
                             }
                         });
+                    }
+                    "current_room_info" => {
+                        let service = voip_service.lock().await;
+                        match service.current_room_info().await {
+                            Ok(room_info) => {
+                                let mut table = Table::new();
+
+                                // Add title row for local participant
+                                table.add_row(row![
+                                    "Local Participant",
+                                    "Is Speaking",
+                                    "Audio Level",
+                                    "Kind"
+                                ]);
+                                let local = &room_info.local_participant;
+                                table.add_row(row![
+                                    local.identity,
+                                    local.is_speaking.to_string(),
+                                    format!("{:.2}", local.audio_level),
+                                    format!("{:?}", local.kind),
+                                ]);
+
+                                // Add title row for remote participants
+                                table.add_row(row![
+                                    "Remote Participants",
+                                    "Is Speaking",
+                                    "Audio Level",
+                                    "Kind"
+                                ]);
+                                for remote in &room_info.remote_participants {
+                                    table.add_row(row![
+                                        remote.identity,
+                                        remote.is_speaking.to_string(),
+                                        format!("{:.2}", remote.audio_level),
+                                        format!("{:?}", remote.kind),
+                                    ]);
+                                }
+
+                                table.printstd();
+                            }
+                            Err(e) => {
+                                println!("Error: {}", e);
+                            }
+                        }
                     }
                     "exit" => {
                         println!("Exiting REPL and shutting down gRPC server.");

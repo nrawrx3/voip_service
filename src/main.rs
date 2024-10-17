@@ -1,9 +1,9 @@
+use livekit::participant::ParticipantKind;
 use livekit::{Room, RoomEvent, RoomOptions};
 use tonic::{transport::Server, Request, Response, Status};
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use futures::Stream;
-use std::fmt::format;
 use std::pin::Pin;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio::sync::mpsc;
@@ -11,6 +11,7 @@ use log::{error, info, warn};
 use reqwest::{Client, StatusCode};
 
 mod repl;
+mod model;
 
 mod config;
 use config::Config;
@@ -197,6 +198,42 @@ impl MyVoipService {
         });
 
         Ok(())
+    }
+
+    // Method to print room info (list of participants)
+    pub async fn current_room_info(&self) -> Result<model::RoomInfo, &'static str> {
+        if self.current_room.is_none() {
+            return Err("Not connected to a room").into();
+        }
+
+        let room = self.current_room.as_ref().unwrap();
+
+        let mut room_info = model::RoomInfo {
+            local_participant: model::ParticipantInfo {
+                identity: self.current_user_name.as_ref().unwrap().to_string(),
+                is_connected: true,
+                is_speaking: false,
+                audio_level: 0.0,
+                kind: ParticipantKind::Standard,
+            },
+            remote_participants: vec![],
+        };
+
+        let local = room.local_participant();
+        room_info.local_participant.is_speaking = local.is_speaking();
+        room_info.local_participant.audio_level = local.audio_level();
+
+        for (identity, participant) in room.remote_participants() {
+            room_info.remote_participants.push(model::ParticipantInfo {
+                identity: identity.as_str().to_string(),
+                is_connected: true,
+                is_speaking: participant.is_speaking(),
+                audio_level: participant.audio_level(),
+                kind: participant.kind(),
+            });
+        }
+
+        return Ok(room_info);
     }
 }
 
