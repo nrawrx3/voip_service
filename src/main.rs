@@ -1,17 +1,25 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use futures::{Stream, StreamExt};
 use livekit::participant::ParticipantKind;
+use livekit::track::{RemoteAudioTrack, RemoteTrack};
+use livekit::webrtc::audio_stream::native::NativeAudioStream;
+use livekit::webrtc::native::audio_resampler::AudioResampler;
 use livekit::{Room, RoomEvent, RoomOptions};
-use tonic::{transport::Server, Request, Response, Status};
-use tokio::sync::Mutex;
-use std::sync::Arc;
-use futures::Stream;
-use std::pin::Pin;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio::sync::mpsc;
 use log::{error, info, warn};
 use reqwest::{Client, StatusCode};
+use std::io::{self, Write};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{transport::Server, Request, Response, Status};
+use wav::WavHeader;
 
-mod repl;
 mod model;
+mod repl;
+mod wav;
 
 mod config;
 use config::Config;
@@ -21,9 +29,9 @@ pub mod pb {
     include!("pb/voip.rs");
 }
 
+use pb::voip_server_event::{EventPayload, EventType};
 use pb::voip_service_server::{VoipService, VoipServiceServer};
 use pb::{ClientInfo, VoipServerEvent};
-use pb::voip_server_event::{EventType, EventPayload};
 
 // Type alias for the streaming server response.
 type ServerEventStream = Pin<Box<dyn Stream<Item = Result<VoipServerEvent, Status>> + Send>>;
@@ -86,21 +94,36 @@ impl VoipService for MyVoipService {
             let mut counter = 0;
             loop {
                 let (event_type, event_payload) = match counter % 5 {
-                    0 => (EventType::MemberJoined, EventPayload::MemberJoined(pb::MemberJoined {
-                        member_id: "lawda".to_string(),
-                    })),
-                    1 => (EventType::MemberLeft, EventPayload::MemberLeft(pb::MemberLeft {
-                        member_id: "lawda".to_string(),
-                    })),
-                    2 => (EventType::MemberMuted, EventPayload::MemberMuted(pb::MemberMuted {
-                        member_id: "lawda".to_string(),
-                    })),
-                    3 => (EventType::MemberUnmuted, EventPayload::MemberUnmuted(pb::MemberUnmuted {
-                        member_id: "lawda".to_string(),
-                    })),
-                    _ => (EventType::MemberSpeaking, EventPayload::MemberSpeaking(pb::MemberSpeaking {
-                        member_id: "lawda".to_string(),
-                    })),
+                    0 => (
+                        EventType::MemberJoined,
+                        EventPayload::MemberJoined(pb::MemberJoined {
+                            member_id: "lawda".to_string(),
+                        }),
+                    ),
+                    1 => (
+                        EventType::MemberLeft,
+                        EventPayload::MemberLeft(pb::MemberLeft {
+                            member_id: "lawda".to_string(),
+                        }),
+                    ),
+                    2 => (
+                        EventType::MemberMuted,
+                        EventPayload::MemberMuted(pb::MemberMuted {
+                            member_id: "lawda".to_string(),
+                        }),
+                    ),
+                    3 => (
+                        EventType::MemberUnmuted,
+                        EventPayload::MemberUnmuted(pb::MemberUnmuted {
+                            member_id: "lawda".to_string(),
+                        }),
+                    ),
+                    _ => (
+                        EventType::MemberSpeaking,
+                        EventPayload::MemberSpeaking(pb::MemberSpeaking {
+                            member_id: "lawda".to_string(),
+                        }),
+                    ),
                 };
 
                 let event = VoipServerEvent {
@@ -137,15 +160,25 @@ impl MyVoipService {
         let user_name = self.current_user_name.as_ref().unwrap();
         let room_name = self.current_room_name.as_ref().unwrap();
 
-        info!("Fetching join token for self {} in room {}", user_name, room_name);
+        info!(
+            "Fetching join token for self {} in room {}",
+            user_name, room_name
+        );
 
-        let url = reqwest::Url::parse_with_params(&self.config.livekit_token_endpoint, &[("room", room_name), ("identity", user_name)])?;
+        let url = reqwest::Url::parse_with_params(
+            &self.config.livekit_token_endpoint,
+            &[("room", room_name), ("identity", user_name)],
+        )?;
 
         info!("Fetching join token from {}", url);
 
         let resp = self.client.get(url).send().await?;
         if !matches!(resp.status(), StatusCode::OK) {
-            error!("Failed to get livekit token for room {}. HTTP Error: {}", room_name, resp.status());
+            error!(
+                "Failed to get livekit token for room {}. HTTP Error: {}",
+                room_name,
+                resp.status()
+            );
             return Err("Failed to get livekit token".into());
         }
 
@@ -156,11 +189,8 @@ impl MyVoipService {
         self.call_state = CallState::Connecting;
 
         let options = RoomOptions::default();
-        let (room, mut room_events) = Room::connect(
-            &self.config.livekit_endpoint,
-            &token,
-            options,
-        ).await?;
+        let (room, mut room_events) =
+            Room::connect(&self.config.livekit_endpoint, &token, options).await?;
 
         info!("Connected to LiveKit room {}", room_name);
 
@@ -175,23 +205,47 @@ impl MyVoipService {
             while let Some(event) = room_events.recv().await {
                 match event {
                     RoomEvent::ParticipantConnected(participant) => {
-                        info!("Participant connected: {}", participant.identity());
+                        println!("Participant connected: {}", participant.identity());
                     }
 
                     RoomEvent::ActiveSpeakersChanged { speakers } => {
-                        info!("Active speakers changed: {:?}", speakers);
+                        println!("Active speakers changed: {:?}", speakers);
                     }
 
                     RoomEvent::ParticipantDisconnected(participant) => {
-                        info!("Participant disconnected: {}", participant.identity());
+                        println!("Participant disconnected: {}", participant.identity());
                     }
 
-                    RoomEvent::LocalTrackPublished { publication, track, participant } => {
-                        info!("Local track published: {:?}", publication);
+                    RoomEvent::LocalTrackPublished {
+                        publication,
+                        track: _,
+                        participant: _,
+                    } => {
+                        println!("Local track published: {:?}", publication);
+                    }
+
+                    RoomEvent::TrackSubscribed {
+                        track,
+                        publication: _,
+                        participant: _,
+                    } => {
+                        println!("Track subscribed: {:?}", track);
+
+                        if let RemoteTrack::Audio(audio_track) = track {
+                            // Play the audio_track.rtc_track in an async task using cpal.
+                            play_audio_stream(audio_track).await.unwrap();
+                        }
+                    }
+
+                    RoomEvent::ConnectionQualityChanged {
+                        quality: _,
+                        participant: _,
+                    } => {
+                        // Do nothing
                     }
 
                     _ => {
-                        info!("Unhandled room event: {:?}", event);
+                        println!("Unhandled room event: {:?}", event);
                     }
                 }
             }
@@ -237,6 +291,100 @@ impl MyVoipService {
     }
 }
 
+async fn play_audio_stream(
+    audio_track: RemoteAudioTrack,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Start audio stream at time {:?}", std::time::Instant::now());
+
+    // Get the default audio output device
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .expect("Failed to find default output device");
+
+    // Set up the output format
+    let config = device.default_output_config()?.into();
+
+    // Set up the resampler
+    let header = WavHeader {
+        sample_rate: 48000, // LiveKit uses 48000 Hz audio sample rate
+        bit_depth: 16,      // 16-bit audio
+        num_channels: 2,    // Stereo
+    };
+    let mut resampler = AudioResampler::default();
+    let rtc_track = audio_track.rtc_track();
+    let mut audio_stream = NativeAudioStream::new(
+        rtc_track,
+        header.sample_rate as i32,
+        header.num_channels as i32,
+    );
+
+    // Build the audio stream for output
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<f32>>(10);
+
+    let stream = device.build_output_stream(
+        &config,
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            if let Ok(samples) = receiver.try_recv() {
+                for (i, sample) in samples.iter().enumerate() {
+                    if i < data.len() {
+                        data[i] = *sample;
+                    }
+                }
+            } else {
+                // If no new samples, fill with silence
+                for sample in data.iter_mut() {
+                    *sample = 0.0;
+                }
+            }
+        },
+        move |err| {
+            eprintln!("Error occurred on stream: {}", err);
+        },
+        // Some(Duration::from_secs(1000)), // Set a timeout of 1 second
+        None,
+    )?;
+
+    // Push audio frames to the cpal stream
+    tokio::spawn(async move {
+        while let Some(frame) = audio_stream.next().await {
+            info!("Received rtc audio frame with {} samples", frame.data.len());
+
+            // Resample the audio frame
+            let data_i16 = resampler.remix_and_resample(
+                &frame.data,
+                frame.samples_per_channel,
+                frame.num_channels,
+                frame.sample_rate,
+                header.num_channels,
+                header.sample_rate,
+            );
+
+            // Convert i16 samples to f32 before sending to cpal
+            let data_f32: Vec<f32> = data_i16
+                .iter()
+                .map(|&sample| sample as f32 / i16::MAX as f32) // Normalize i16 to f32
+                .collect();
+
+            info!("Sending {} samples to cpal", data_f32.len());
+
+            let _ = sender.send(data_f32).await; // Send the f32 samples to the cpal callback
+        }
+    });
+
+    // Start the stream
+    if let Err(err) = stream.play() {
+        error!(
+            "Failed to play audio stream on device: {}, error: {}",
+            device.name()?,
+            err
+        );
+    } else {
+        info!("Playing audio stream on device: {}", device.name()?);
+    }
+
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
