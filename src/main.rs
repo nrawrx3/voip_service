@@ -237,6 +237,21 @@ impl MyVoipService {
                         }
                     }
 
+                    RoomEvent::LocalTrackSubscribed { track } => {
+                        println!("Local track subscribed: {:?}", track);
+                    }
+
+                    RoomEvent::TrackSubscriptionFailed {
+                        participant,
+                        error,
+                        track_sid,
+                    } => {
+                        println!(
+                            "Track subscription failed: {:?}, {:?}, {:?}",
+                            participant, error, track_sid
+                        );
+                    }
+
                     RoomEvent::ConnectionQualityChanged {
                         quality: _,
                         participant: _,
