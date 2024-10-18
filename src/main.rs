@@ -318,83 +318,94 @@ async fn play_audio_stream(
     // Set up the output format
     let config = device.default_output_config()?.into();
 
+    let sample_rate = 48000;
+    let bit_depth = 16;
+    let num_channels = 2;
+
     // Set up the resampler
-    let header = WavHeader {
-        sample_rate: 48000, // LiveKit uses 48000 Hz audio sample rate
-        bit_depth: 16,      // 16-bit audio
-        num_channels: 2,    // Stereo
-    };
     let mut resampler = AudioResampler::default();
     let rtc_track = audio_track.rtc_track();
-    let mut audio_stream = NativeAudioStream::new(
-        rtc_track,
-        header.sample_rate as i32,
-        header.num_channels as i32,
-    );
+    let mut audio_stream =
+        NativeAudioStream::new(rtc_track, sample_rate as i32, num_channels as i32);
 
-    // Build the audio stream for output
+    // Build a channel to send audio samples
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<f32>>(10);
 
-    let stream = device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if let Ok(samples) = receiver.try_recv() {
-                for (i, sample) in samples.iter().enumerate() {
-                    if i < data.len() {
-                        data[i] = *sample;
+    // Start a separate thread to handle the audio playback using cpal
+    std::thread::spawn(move || {
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if let Ok(samples) = receiver.try_recv() {
+                        info!("Received {} samples from cpal thread", samples.len());
+
+                        for (i, sample) in samples.iter().enumerate() {
+                            if i < data.len() {
+                                data[i] = *sample;
+                            }
+                        }
+                    } else {
+                        // If no new samples, fill with silence.
+                        info!("No new samples, filling with silence");
+                        for sample in data.iter_mut() {
+                            *sample = 0.0;
+                        }
                     }
-                }
-            } else {
-                // If no new samples, fill with silence
-                for sample in data.iter_mut() {
-                    *sample = 0.0;
-                }
-            }
-        },
-        move |err| {
-            eprintln!("Error occurred on stream: {}", err);
-        },
-        // Some(Duration::from_secs(1000)), // Set a timeout of 1 second
-        None,
-    )?;
+                },
+                move |err| {
+                    eprintln!("Error occurred on stream: {}", err);
+                },
+                None, // No timeout needed here
+            )
+            .unwrap();
 
-    // Push audio frames to the cpal stream
-    tokio::spawn(async move {
-        while let Some(frame) = audio_stream.next().await {
-            info!("Received rtc audio frame with {} samples", frame.data.len());
-
-            // Resample the audio frame
-            let data_i16 = resampler.remix_and_resample(
-                &frame.data,
-                frame.samples_per_channel,
-                frame.num_channels,
-                frame.sample_rate,
-                header.num_channels,
-                header.sample_rate,
+        // Start the stream in the separate thread
+        if let Err(err) = stream.play() {
+            error!(
+                "Failed to play audio stream on device: {}, error: {}",
+                device.name().unwrap(),
+                err
             );
-
-            // Convert i16 samples to f32 before sending to cpal
-            let data_f32: Vec<f32> = data_i16
-                .iter()
-                .map(|&sample| sample as f32 / i16::MAX as f32) // Normalize i16 to f32
-                .collect();
-
-            info!("Sending {} samples to cpal", data_f32.len());
-
-            let _ = sender.send(data_f32).await; // Send the f32 samples to the cpal callback
+        } else {
+            info!("Playing audio stream on device: {}", device.name().unwrap());
         }
+
+        // Keep the thread alive for the duration of the stream
+        std::thread::park(); // Thread will sleep here until manually woken
     });
 
-    // Start the stream
-    if let Err(err) = stream.play() {
-        error!(
-            "Failed to play audio stream on device: {}, error: {}",
-            device.name()?,
-            err
-        );
-    } else {
-        info!("Playing audio stream on device: {}", device.name()?);
-    }
+    // Push audio frames to the cpal stream asynchronously
+    tokio::spawn(async move {
+        loop {
+            match audio_stream.next().await {
+                Some(frame) => {
+                    log::info!("Received audio frame with {} samples", frame.data.len());
+                    // Resample the audio frame
+                    let data_i16 = resampler.remix_and_resample(
+                        &frame.data,
+                        frame.samples_per_channel,
+                        frame.num_channels,
+                        frame.sample_rate,
+                        num_channels,
+                        sample_rate,
+                    );
+
+                    // Convert i16 samples to f32 before sending to cpal
+                    let data_f32: Vec<f32> = data_i16
+                        .iter()
+                        .map(|&sample| sample as f32 / i16::MAX as f32) // Normalize i16 to f32
+                        .collect();
+
+                    let _ = sender.send(data_f32).await; // Send the f32 samples to the cpal callback
+                }
+                None => {
+                    info!("No more audio frames to play, closing cpal stream");
+                    break;
+                }
+            }
+        }
+    });
 
     Ok(())
 }
