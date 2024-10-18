@@ -201,70 +201,68 @@ impl MyVoipService {
         self.all_member_names = vec![user_name.to_string()];
         self.livekit_token = Some(token);
 
-        tokio::spawn(async move {
-            while let Some(event) = room_events.recv().await {
-                match event {
-                    RoomEvent::ParticipantConnected(participant) => {
-                        println!("Participant connected: {}", participant.identity());
-                    }
+        while let Some(event) = room_events.recv().await {
+            match event {
+                RoomEvent::ParticipantConnected(participant) => {
+                    println!("Participant connected: {}", participant.identity());
+                }
 
-                    RoomEvent::ActiveSpeakersChanged { speakers } => {
-                        println!("Active speakers changed: {:?}", speakers);
-                    }
+                RoomEvent::ActiveSpeakersChanged { speakers } => {
+                    println!("Active speakers changed: {:?}", speakers);
+                }
 
-                    RoomEvent::ParticipantDisconnected(participant) => {
-                        println!("Participant disconnected: {}", participant.identity());
-                    }
+                RoomEvent::ParticipantDisconnected(participant) => {
+                    println!("Participant disconnected: {}", participant.identity());
+                }
 
-                    RoomEvent::LocalTrackPublished {
-                        publication,
-                        track: _,
-                        participant: _,
-                    } => {
-                        println!("Local track published: {:?}", publication);
-                    }
+                RoomEvent::LocalTrackPublished {
+                    publication,
+                    track: _,
+                    participant: _,
+                } => {
+                    println!("Local track published: {:?}", publication);
+                }
 
-                    RoomEvent::TrackSubscribed {
-                        track,
-                        publication: _,
-                        participant: _,
-                    } => {
-                        println!("Track subscribed: {:?}", track);
+                RoomEvent::TrackSubscribed {
+                    track,
+                    publication: _,
+                    participant: _,
+                } => {
+                    println!("Track subscribed: {:?}", track);
 
-                        if let RemoteTrack::Audio(audio_track) = track {
-                            // Play the audio_track.rtc_track in an async task using cpal.
-                            play_audio_stream(audio_track).await.unwrap();
-                        }
-                    }
-
-                    RoomEvent::LocalTrackSubscribed { track } => {
-                        println!("Local track subscribed: {:?}", track);
-                    }
-
-                    RoomEvent::TrackSubscriptionFailed {
-                        participant,
-                        error,
-                        track_sid,
-                    } => {
-                        println!(
-                            "Track subscription failed: {:?}, {:?}, {:?}",
-                            participant, error, track_sid
-                        );
-                    }
-
-                    RoomEvent::ConnectionQualityChanged {
-                        quality: _,
-                        participant: _,
-                    } => {
-                        // Do nothing
-                    }
-
-                    _ => {
-                        println!("Unhandled room event: {:?}", event);
+                    if let RemoteTrack::Audio(audio_track) = track {
+                        // Play the audio_track.rtc_track in an async task using cpal.
+                        play_audio_stream(audio_track).await.unwrap();
                     }
                 }
+
+                RoomEvent::LocalTrackSubscribed { track } => {
+                    println!("Local track subscribed: {:?}", track);
+                }
+
+                RoomEvent::TrackSubscriptionFailed {
+                    participant,
+                    error,
+                    track_sid,
+                } => {
+                    println!(
+                        "Track subscription failed: {:?}, {:?}, {:?}",
+                        participant, error, track_sid
+                    );
+                }
+
+                RoomEvent::ConnectionQualityChanged {
+                    quality: _,
+                    participant: _,
+                } => {
+                    // Do nothing
+                }
+
+                _ => {
+                    println!("Unhandled room event: {:?}", event);
+                }
             }
-        });
+        }
 
         Ok(())
     }
