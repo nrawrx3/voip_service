@@ -3,11 +3,13 @@ syntax = "proto3";
 package voip;
 
 service VoipService {
-  
-  // Client registers with the server.
-  rpc Register(ClientInfo) returns (stream VoipServerEvent) {}
-}
+  // Client registers with the server and starts receiving events.
+  rpc JoinRoom(ClientInfo) returns (stream VoipServerEvent) {}
 
+  // We can connect to the server with another client and manually send debug
+  // events.
+  rpc SendDebugEventToClient(SendDebugEventPayload) returns (VoipServerEvent) {}
+}
 
 message ClientInfo {
   string client_id = 1;
@@ -47,6 +49,8 @@ message MemberMuted { string member_id = 1; }
 message MemberUnmuted { string member_id = 1; }
 
 message MemberSpeaking { string member_id = 1; }
+
+message SendDebugEventPayload { VoipServerEvent.EventType event_type = 1; }
 
 // Room state snapshot (for initial registration or re-sync)
 message RoomState {

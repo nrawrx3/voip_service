@@ -106,6 +106,11 @@ pub struct MemberSpeaking {
     #[prost(string, tag = "1")]
     pub member_id: ::prost::alloc::string::String,
 }
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct SendDebugEventPayload {
+    #[prost(enumeration = "voip_server_event::EventType", tag = "1")]
+    pub event_type: i32,
+}
 /// Room state snapshot (for initial registration or re-sync)
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomState {
@@ -212,8 +217,8 @@ pub mod voip_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Client registers with the server.
-        pub async fn register(
+        /// Client registers with the server and starts receiving events.
+        pub async fn join_room(
             &mut self,
             request: impl tonic::IntoRequest<super::ClientInfo>,
         ) -> std::result::Result<
@@ -230,11 +235,37 @@ pub mod voip_service_client {
                 })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/voip.VoipService/Register",
+                "/voip.VoipService/JoinRoom",
             );
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("voip.VoipService", "Register"));
+            req.extensions_mut().insert(GrpcMethod::new("voip.VoipService", "JoinRoom"));
             self.inner.server_streaming(req, path, codec).await
+        }
+        /// We can connect to the server with another client and manually send debug
+        /// events.
+        pub async fn send_debug_event_to_client(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SendDebugEventPayload>,
+        ) -> std::result::Result<
+            tonic::Response<super::VoipServerEvent>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/voip.VoipService/SendDebugEventToClient",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("voip.VoipService", "SendDebugEventToClient"));
+            self.inner.unary(req, path, codec).await
         }
     }
 }
@@ -251,17 +282,23 @@ pub mod voip_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with VoipServiceServer.
     #[async_trait]
     pub trait VoipService: std::marker::Send + std::marker::Sync + 'static {
-        /// Server streaming response type for the Register method.
-        type RegisterStream: tonic::codegen::tokio_stream::Stream<
+        /// Server streaming response type for the JoinRoom method.
+        type JoinRoomStream: tonic::codegen::tokio_stream::Stream<
                 Item = std::result::Result<super::VoipServerEvent, tonic::Status>,
             >
             + std::marker::Send
             + 'static;
-        /// Client registers with the server.
-        async fn register(
+        /// Client registers with the server and starts receiving events.
+        async fn join_room(
             &self,
             request: tonic::Request<super::ClientInfo>,
-        ) -> std::result::Result<tonic::Response<Self::RegisterStream>, tonic::Status>;
+        ) -> std::result::Result<tonic::Response<Self::JoinRoomStream>, tonic::Status>;
+        /// We can connect to the server with another client and manually send debug
+        /// events.
+        async fn send_debug_event_to_client(
+            &self,
+            request: tonic::Request<super::SendDebugEventPayload>,
+        ) -> std::result::Result<tonic::Response<super::VoipServerEvent>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct VoipServiceServer<T> {
@@ -339,15 +376,15 @@ pub mod voip_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/voip.VoipService/Register" => {
+                "/voip.VoipService/JoinRoom" => {
                     #[allow(non_camel_case_types)]
-                    struct RegisterSvc<T: VoipService>(pub Arc<T>);
+                    struct JoinRoomSvc<T: VoipService>(pub Arc<T>);
                     impl<
                         T: VoipService,
                     > tonic::server::ServerStreamingService<super::ClientInfo>
-                    for RegisterSvc<T> {
+                    for JoinRoomSvc<T> {
                         type Response = super::VoipServerEvent;
-                        type ResponseStream = T::RegisterStream;
+                        type ResponseStream = T::JoinRoomStream;
                         type Future = BoxFuture<
                             tonic::Response<Self::ResponseStream>,
                             tonic::Status,
@@ -358,7 +395,7 @@ pub mod voip_service_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as VoipService>::register(&inner, request).await
+                                <T as VoipService>::join_room(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -369,7 +406,7 @@ pub mod voip_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = RegisterSvc(inner);
+                        let method = JoinRoomSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -381,6 +418,55 @@ pub mod voip_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/voip.VoipService/SendDebugEventToClient" => {
+                    #[allow(non_camel_case_types)]
+                    struct SendDebugEventToClientSvc<T: VoipService>(pub Arc<T>);
+                    impl<
+                        T: VoipService,
+                    > tonic::server::UnaryService<super::SendDebugEventPayload>
+                    for SendDebugEventToClientSvc<T> {
+                        type Response = super::VoipServerEvent;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SendDebugEventPayload>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as VoipService>::send_debug_event_to_client(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SendDebugEventToClientSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)
