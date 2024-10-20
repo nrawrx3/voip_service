@@ -18,12 +18,13 @@ message ClientInfo {
 
 message VoipServerEvent {
   enum EventType {
-    event_type_member_joined = 0;
-    event_type_member_left = 1;
-    event_type_member_muted = 2;
-    event_type_member_unmuted = 3;
-    event_type_member_speaking = 4;
-    event_type_current_user_left = 5;
+    event_type_ping = 0;
+    event_type_member_joined = 1;
+    event_type_member_left = 2;
+    event_type_member_muted = 3;
+    event_type_member_unmuted = 4;
+    event_type_member_speaking = 5;
+    event_type_current_user_left = 6;
   }
 
   EventType event_type = 1;

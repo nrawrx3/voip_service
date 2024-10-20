@@ -32,12 +32,13 @@ pub mod voip_server_event {
     )]
     #[repr(i32)]
     pub enum EventType {
-        MemberJoined = 0,
-        MemberLeft = 1,
-        MemberMuted = 2,
-        MemberUnmuted = 3,
-        MemberSpeaking = 4,
-        CurrentUserLeft = 5,
+        Ping = 0,
+        MemberJoined = 1,
+        MemberLeft = 2,
+        MemberMuted = 3,
+        MemberUnmuted = 4,
+        MemberSpeaking = 5,
+        CurrentUserLeft = 6,
     }
     impl EventType {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -46,6 +47,7 @@ pub mod voip_server_event {
         /// (if the ProtoBuf definition does not change) and safe for programmatic use.
         pub fn as_str_name(&self) -> &'static str {
             match self {
+                Self::Ping => "event_type_ping",
                 Self::MemberJoined => "event_type_member_joined",
                 Self::MemberLeft => "event_type_member_left",
                 Self::MemberMuted => "event_type_member_muted",
@@ -57,6 +59,7 @@ pub mod voip_server_event {
         /// Creates an enum from field names used in the ProtoBuf definition.
         pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
             match value {
+                "event_type_ping" => Some(Self::Ping),
                 "event_type_member_joined" => Some(Self::MemberJoined),
                 "event_type_member_left" => Some(Self::MemberLeft),
                 "event_type_member_muted" => Some(Self::MemberMuted),

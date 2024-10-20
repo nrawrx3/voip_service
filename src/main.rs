@@ -73,7 +73,7 @@ impl Default for MyVoipService {
 }
 
 #[tonic::async_trait]
-impl VoipService for Arc<Mutex<MyVoipService>> {
+impl VoipService for SharedVoipService {
     type JoinRoomStream = ServerEventStream;
 
     async fn join_room(
@@ -98,7 +98,46 @@ impl VoipService for Arc<Mutex<MyVoipService>> {
         // Convert the receiver into a stream.
         let stream = ReceiverStream::new(rx);
 
-        Ok(Response::new(Box::pin(stream) as Self::JoinRoomStream))
+        // Connect to LiveKit
+        let res =
+            locked_connect_to_livekit(self.clone(), &client_info.client_id, &client_info.room_id)
+                .await;
+
+        let return_value: Result<Response<Self::JoinRoomStream>, Status> = match res {
+            Ok(_) => {
+                info!("Connected to LiveKit room {}", client_info.room_id);
+                Ok(Response::new(Box::pin(stream) as Self::JoinRoomStream))
+            }
+            Err(err) => {
+                error!("Failed to connect to LiveKit room: {}", err);
+                Err(Status::internal("Failed to connect to LiveKit"))
+            }
+        };
+
+        info!("Returning from join_room");
+
+        let self_ref = self.clone();
+
+        // Send a ping event back to the client after 2 seconds.
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            if let Some(sender) = &self_ref.lock().await.event_sender {
+                let event = VoipServerEvent {
+                    event_type: EventType::Ping as i32,
+                    current_user_id: client_info.client_id.clone(),
+                    room_id: client_info.room_id.clone(),
+                    event_payload: None,
+                };
+
+                if sender.send(Ok(event)).await.is_err() {
+                    warn!("Failed to send event to client");
+                } else {
+                    info!("Sent ping event to client");
+                }
+            }
+        });
+
+        return_value
     }
 
     async fn send_debug_event_to_client(
@@ -138,16 +177,26 @@ impl VoipService for Arc<Mutex<MyVoipService>> {
     }
 }
 
+pub async fn locked_connect_to_livekit(
+    service: SharedVoipService,
+    user_name: &str,
+    room_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut service = service.lock().await;
+
+    let result = service.connect_to_livekit(&user_name, &room_name).await;
+
+    info!("connect_to_livekit call returned");
+
+    result
+}
+
 impl MyVoipService {
-    pub async fn connect_to_livekit(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.current_user_name.is_none() || self.current_room_name.is_none() {
-            warn!("Cannot connect to LiveKit without knowing the user name and room name");
-            return Err("Not logged in to livekit".into());
-        }
-
-        let user_name = self.current_user_name.as_ref().unwrap();
-        let room_name = self.current_room_name.as_ref().unwrap();
-
+    pub async fn connect_to_livekit(
+        &mut self,
+        user_name: &str,
+        room_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         info!(
             "Fetching join token for self {} in room {}",
             user_name, room_name
@@ -182,75 +231,79 @@ impl MyVoipService {
 
         info!("Connected to LiveKit room {}", room_name);
 
-        // Save the room handle.
+        // Save the room handle and info.
+        self.current_user_name = Some(user_name.to_string());
+        self.current_room_name = Some(room_name.to_string());
         self.current_room = Some(Arc::new(room));
         self.call_state = CallState::Connected;
-
         self.all_member_names = vec![user_name.to_string()];
         self.livekit_token = Some(token);
 
-        while let Some(event) = room_events.recv().await {
-            match event {
-                RoomEvent::ParticipantConnected(participant) => {
-                    println!("Participant connected: {}", participant.identity());
-                }
+        // Start a task to handle room events.
+        tokio::spawn(async move {
+            while let Some(event) = room_events.recv().await {
+                match event {
+                    RoomEvent::ParticipantConnected(participant) => {
+                        println!("Participant connected: {}", participant.identity());
+                    }
 
-                RoomEvent::ActiveSpeakersChanged { speakers } => {
-                    println!("Active speakers changed: {:?}", speakers);
-                }
+                    RoomEvent::ActiveSpeakersChanged { speakers } => {
+                        println!("Active speakers changed: {:?}", speakers);
+                    }
 
-                RoomEvent::ParticipantDisconnected(participant) => {
-                    println!("Participant disconnected: {}", participant.identity());
-                }
+                    RoomEvent::ParticipantDisconnected(participant) => {
+                        println!("Participant disconnected: {}", participant.identity());
+                    }
 
-                RoomEvent::LocalTrackPublished {
-                    publication,
-                    track: _,
-                    participant: _,
-                } => {
-                    println!("Local track published: {:?}", publication);
-                }
+                    RoomEvent::LocalTrackPublished {
+                        publication,
+                        track: _,
+                        participant: _,
+                    } => {
+                        println!("Local track published: {:?}", publication);
+                    }
 
-                RoomEvent::TrackSubscribed {
-                    track,
-                    publication: _,
-                    participant: _,
-                } => {
-                    println!("Track subscribed: {:?}", track);
+                    RoomEvent::TrackSubscribed {
+                        track,
+                        publication: _,
+                        participant: _,
+                    } => {
+                        println!("Track subscribed: {:?}", track);
 
-                    if let RemoteTrack::Audio(audio_track) = track {
-                        // Play the audio_track.rtc_track in an async task using cpal.
-                        play_audio_stream(audio_track).await.unwrap();
+                        if let RemoteTrack::Audio(audio_track) = track {
+                            // Play the audio_track.rtc_track in an async task using cpal.
+                            play_audio_stream(audio_track).await.unwrap();
+                        }
+                    }
+
+                    RoomEvent::LocalTrackSubscribed { track } => {
+                        println!("Local track subscribed: {:?}", track);
+                    }
+
+                    RoomEvent::TrackSubscriptionFailed {
+                        participant,
+                        error,
+                        track_sid,
+                    } => {
+                        println!(
+                            "Track subscription failed: {:?}, {:?}, {:?}",
+                            participant, error, track_sid
+                        );
+                    }
+
+                    RoomEvent::ConnectionQualityChanged {
+                        quality: _,
+                        participant: _,
+                    } => {
+                        // Do nothing
+                    }
+
+                    _ => {
+                        println!("Unhandled room event: {:?}", event);
                     }
                 }
-
-                RoomEvent::LocalTrackSubscribed { track } => {
-                    println!("Local track subscribed: {:?}", track);
-                }
-
-                RoomEvent::TrackSubscriptionFailed {
-                    participant,
-                    error,
-                    track_sid,
-                } => {
-                    println!(
-                        "Track subscription failed: {:?}, {:?}, {:?}",
-                        participant, error, track_sid
-                    );
-                }
-
-                RoomEvent::ConnectionQualityChanged {
-                    quality: _,
-                    participant: _,
-                } => {
-                    // Do nothing
-                }
-
-                _ => {
-                    println!("Unhandled room event: {:?}", event);
-                }
             }
-        }
+        });
 
         Ok(())
     }
@@ -405,12 +458,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = "[::1]:50051".parse().unwrap();
 
-    info!("Starting voip_service at {}", addr);
+    info!("Starting grpc server at {}", addr);
 
     Server::builder()
         .add_service(VoipServiceServer::new(voip_service))
         .serve_with_shutdown(addr, async {
             shutdown_rx.await.ok();
+            info!("Shutting down grpc server");
         })
         .await?;
 
