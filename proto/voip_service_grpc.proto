@@ -14,7 +14,7 @@ service VoipService {
 message ClientInfo {
   string client_id = 1;
   string user_name = 2;
-  string room_id = 3;
+  string room_name = 3;
 }
 
 message VoipServerEvent {
@@ -30,8 +30,8 @@ message VoipServerEvent {
 
   EventType event_type = 1;
 
-  string current_user_id = 2;
-  string room_id = 3;
+  string current_user_name = 2;
+  string current_room_name = 3;
 
   oneof event_payload {
     MemberJoined member_joined = 4;
@@ -60,7 +60,7 @@ message SendDebugEventPayload {
 
 // Room state snapshot (for initial registration or re-sync)
 message RoomState {
-  string room_id = 1;
+  string room_name = 1;
   repeated string member_ids = 2;
   map<string, bool> muted_status = 3;
   map<string, bool> speaking_status = 4;

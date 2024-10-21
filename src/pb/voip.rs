@@ -6,16 +6,16 @@ pub struct ClientInfo {
     #[prost(string, tag = "2")]
     pub user_name: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
-    pub room_id: ::prost::alloc::string::String,
+    pub room_name: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct VoipServerEvent {
     #[prost(enumeration = "voip_server_event::EventType", tag = "1")]
     pub event_type: i32,
     #[prost(string, tag = "2")]
-    pub current_user_id: ::prost::alloc::string::String,
+    pub current_user_name: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
-    pub room_id: ::prost::alloc::string::String,
+    pub current_room_name: ::prost::alloc::string::String,
     #[prost(oneof = "voip_server_event::EventPayload", tags = "4, 5, 6, 7, 8")]
     pub event_payload: ::core::option::Option<voip_server_event::EventPayload>,
 }
@@ -124,7 +124,7 @@ pub struct SendDebugEventPayload {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RoomState {
     #[prost(string, tag = "1")]
-    pub room_id: ::prost::alloc::string::String,
+    pub room_name: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "2")]
     pub member_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(map = "string, bool", tag = "3")]

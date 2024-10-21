@@ -1,5 +1,6 @@
 use core::error;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use futures::future::Shared;
 use futures::{Stream, StreamExt};
 use livekit::participant::ParticipantKind;
 use livekit::track::{RemoteAudioTrack, RemoteTrack};
@@ -11,7 +12,8 @@ use reqwest::{Client, StatusCode};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::thread::current;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::client;
@@ -51,6 +53,9 @@ pub struct MyVoipService {
     pub current_room: Option<Arc<Room>>,
     pub connected_client_ids: Vec<String>,
     pub event_sender_of_client: HashMap<String, EventSenderChannel>,
+
+    // Used to communicate with the event sender task.
+    pub grpc_event_tx: Option<mpsc::UnboundedSender<VoipServerEvent>>,
 }
 
 type SharedVoipService = Arc<Mutex<MyVoipService>>;
@@ -75,6 +80,7 @@ impl Default for MyVoipService {
             current_room: None,
             connected_client_ids: vec![],
             event_sender_of_client: HashMap::new(),
+            grpc_event_tx: None,
         }
     }
 }
@@ -90,7 +96,7 @@ impl VoipService for SharedVoipService {
         let client_info = request.into_inner();
         println!(
             "Client {} registered for room {} with user_name {}",
-            client_info.client_id, client_info.room_id, client_info.user_name
+            client_info.client_id, client_info.room_name, client_info.user_name
         );
 
         // Create a channel to send events to the client.
@@ -108,17 +114,17 @@ impl VoipService for SharedVoipService {
         let stream = ReceiverStream::new(rx);
 
         // Connect to LiveKit
-        let res = locked_connect_to_livekit(
+        let res = connect_to_livekit(
             self.clone(),
             &client_info.client_id,
             &client_info.user_name,
-            &client_info.room_id,
+            &client_info.room_name,
         )
         .await;
 
         let return_value: Result<Response<Self::JoinRoomStream>, Status> = match res {
             Ok(_) => {
-                info!("Connected to LiveKit room {}", client_info.room_id);
+                info!("Connected to LiveKit room {}", client_info.room_name);
                 Ok(Response::new(Box::pin(stream) as Self::JoinRoomStream))
             }
             Err(err) => {
@@ -143,8 +149,8 @@ impl VoipService for SharedVoipService {
 
             let event = VoipServerEvent {
                 event_type: EventType::Ping as i32,
-                current_user_id: client_info.user_name.clone(),
-                room_id: client_info.room_id.clone(),
+                current_user_name: client_info.user_name.clone(),
+                current_room_name: client_info.room_name.clone(),
                 event_payload: None,
             };
 
@@ -169,11 +175,11 @@ impl VoipService for SharedVoipService {
         // Create the event.
         let voip_service_event = VoipServerEvent {
             event_type: payload.event_type as i32,
-            current_user_id: service
+            current_user_name: service
                 .current_user_name
                 .clone()
                 .unwrap_or("none".to_string()),
-            room_id: service
+            current_room_name: service
                 .current_room_name
                 .clone()
                 .unwrap_or("none".to_string()),
@@ -202,141 +208,84 @@ impl VoipService for SharedVoipService {
     }
 }
 
-pub async fn locked_connect_to_livekit(
+pub async fn connect_to_livekit(
     service: SharedVoipService,
     client_id: &str,
     user_name: &str,
     room_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut service = service.lock().await;
+    let mut service_guard = service.lock().await;
 
-    let result = service
-        .connect_to_livekit(&client_id, &user_name, &room_name)
-        .await;
+    info!(
+        "Fetching join token for self {} in room {}",
+        user_name, room_name
+    );
 
-    info!("connect_to_livekit call returned");
+    let url = reqwest::Url::parse_with_params(
+        &service_guard.config.livekit_token_endpoint,
+        &[("room", room_name), ("identity", user_name)],
+    )?;
 
-    result
+    info!("Fetching join token from {}", url);
+
+    let resp = service_guard.http_client.get(url).send().await?;
+    if !matches!(resp.status(), StatusCode::OK) {
+        error!(
+            "Failed to get livekit token for room {}. HTTP Error: {}",
+            room_name,
+            resp.status()
+        );
+        return Err("Failed to get livekit token".into());
+    }
+
+    let token = resp.text().await?;
+
+    info!("Received token {}", token);
+
+    service_guard.call_state = CallState::Connecting;
+
+    let options = RoomOptions::default();
+    let connect_result =
+        Room::connect(&service_guard.config.livekit_endpoint, &token, options).await;
+
+    match connect_result {
+        Ok((room, mut room_events)) => {
+            info!("Connected to LiveKit room {}", room_name);
+
+            // Save the room handle and info.
+            service_guard.current_user_name = Some(user_name.to_string());
+            service_guard.current_room_name = Some(room_name.to_string());
+            service_guard.current_room = Some(Arc::new(room));
+            service_guard.call_state = CallState::Connected;
+            service_guard.all_member_names = vec![user_name.to_string()];
+            service_guard.livekit_token = Some(token);
+
+            info!("connect_to_livekit call returned");
+
+            // Start a separate task to handle room events.
+            tokio::spawn(handle_room_events(
+                service.clone(),
+                user_name.to_string(),
+                room_name.to_string(),
+                room_events,
+            ));
+
+            // Start a task to send grpc events to the client.
+            let (grpc_event_tx, mut grpc_event_rx) = mpsc::unbounded_channel();
+            service_guard.grpc_event_tx = Some(grpc_event_tx);
+            tokio::spawn(send_event_to_clients(service.clone(), grpc_event_rx));
+
+            Ok(())
+        }
+
+        Err(err) => {
+            error!("Failed to connect to LiveKit room: {}", err);
+            Err("Failed to connect to LiveKit".into())
+        }
+    }
 }
 
 impl MyVoipService {
-    pub async fn connect_to_livekit(
-        &mut self,
-        client_id: &str,
-        user_name: &str,
-        room_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        info!(
-            "Fetching join token for self {} in room {}",
-            user_name, room_name
-        );
-
-        let url = reqwest::Url::parse_with_params(
-            &self.config.livekit_token_endpoint,
-            &[("room", room_name), ("identity", user_name)],
-        )?;
-
-        info!("Fetching join token from {}", url);
-
-        let resp = self.http_client.get(url).send().await?;
-        if !matches!(resp.status(), StatusCode::OK) {
-            error!(
-                "Failed to get livekit token for room {}. HTTP Error: {}",
-                room_name,
-                resp.status()
-            );
-            return Err("Failed to get livekit token".into());
-        }
-
-        let token = resp.text().await?;
-
-        info!("Received token {}", token);
-
-        self.call_state = CallState::Connecting;
-
-        let options = RoomOptions::default();
-        let (room, mut room_events) =
-            Room::connect(&self.config.livekit_endpoint, &token, options).await?;
-
-        info!("Connected to LiveKit room {}", room_name);
-
-        // Save the room handle and info.
-        self.current_user_name = Some(user_name.to_string());
-        self.current_room_name = Some(room_name.to_string());
-        self.current_room = Some(Arc::new(room));
-        self.call_state = CallState::Connected;
-        self.all_member_names = vec![user_name.to_string()];
-        self.livekit_token = Some(token);
-
-        // Start a task to handle room events.
-        tokio::spawn(async move {
-            while let Some(event) = room_events.recv().await {
-                match event {
-                    RoomEvent::ParticipantConnected(participant) => {
-                        println!("Participant connected: {}", participant.identity());
-                    }
-
-                    RoomEvent::ActiveSpeakersChanged { speakers } => {
-                        println!("Active speakers changed: {:?}", speakers);
-                    }
-
-                    RoomEvent::ParticipantDisconnected(participant) => {
-                        println!("Participant disconnected: {}", participant.identity());
-                    }
-
-                    RoomEvent::LocalTrackPublished {
-                        publication,
-                        track: _,
-                        participant: _,
-                    } => {
-                        println!("Local track published: {:?}", publication);
-                    }
-
-                    RoomEvent::TrackSubscribed {
-                        track,
-                        publication: _,
-                        participant: _,
-                    } => {
-                        println!("Track subscribed: {:?}", track);
-
-                        if let RemoteTrack::Audio(audio_track) = track {
-                            // Play the audio_track.rtc_track in an async task using cpal.
-                            play_audio_stream(audio_track).await.unwrap();
-                        }
-                    }
-
-                    RoomEvent::LocalTrackSubscribed { track } => {
-                        println!("Local track subscribed: {:?}", track);
-                    }
-
-                    RoomEvent::TrackSubscriptionFailed {
-                        participant,
-                        error,
-                        track_sid,
-                    } => {
-                        println!(
-                            "Track subscription failed: {:?}, {:?}, {:?}",
-                            participant, error, track_sid
-                        );
-                    }
-
-                    RoomEvent::ConnectionQualityChanged {
-                        quality: _,
-                        participant: _,
-                    } => {
-                        // Do nothing
-                    }
-
-                    _ => {
-                        println!("Unhandled room event: {:?}", event);
-                    }
-                }
-            }
-        });
-
-        Ok(())
-    }
-
     // Method to print room info (list of participants)
     pub async fn current_room_info(&self) -> Result<model::RoomInfo, &'static str> {
         if self.current_room.is_none() {
@@ -374,6 +323,138 @@ impl MyVoipService {
     }
 }
 
+async fn handle_room_events(
+    service: SharedVoipService,
+    current_user_name: String,
+    current_room_name: String,
+    mut room_events: UnboundedReceiver<RoomEvent>,
+) {
+    while let Some(event) = room_events.recv().await {
+        match event {
+            RoomEvent::ParticipantConnected(participant) => {
+                println!("Participant connected: {}", participant.identity());
+
+                let mut service_guard = service.lock().await;
+
+                service_guard
+                    .all_member_names
+                    .push(participant.identity().to_string());
+
+                // Send event_type_member_joined to all connected clients.
+                let event = VoipServerEvent {
+                    event_type: EventType::MemberJoined as i32,
+                    current_user_name: current_user_name.to_string(),
+                    current_room_name: current_room_name.to_string(),
+                    event_payload: Some(EventPayload::MemberJoined(pb::MemberJoined {
+                        member_id: participant.identity().to_string(),
+                    })),
+                };
+
+                if let Some(grpc_event_tx) = &service_guard.grpc_event_tx {
+                    if let Err(e) = grpc_event_tx.send(event) {
+                        error!("Failed to send event to client: {}", e);
+                    }
+                }
+            }
+
+            RoomEvent::ParticipantDisconnected(participant) => {
+                println!("Participant disconnected: {}", participant.identity());
+
+                let mut service_guard = service.lock().await;
+
+                // Remove the participant from the list of all members.
+                service_guard
+                    .all_member_names
+                    .retain(|name| name != participant.identity().as_str());
+
+                // Send event_type_member_left to all connected clients.
+                let event = VoipServerEvent {
+                    event_type: EventType::MemberLeft as i32,
+                    current_user_name: current_user_name.to_string(),
+                    current_room_name: current_room_name.to_string(),
+                    event_payload: Some(EventPayload::MemberLeft(pb::MemberLeft {
+                        member_id: participant.identity().to_string(),
+                    })),
+                };
+
+                if let Some(grpc_event_tx) = &service_guard.grpc_event_tx {
+                    if let Err(e) = grpc_event_tx.send(event) {
+                        error!("Failed to send event to client: {}", e);
+                    }
+                }
+            }
+
+            RoomEvent::ActiveSpeakersChanged { speakers } => {
+                println!("Active speakers changed: {:?}", speakers);
+            }
+
+            RoomEvent::LocalTrackPublished {
+                publication,
+                track: _,
+                participant: _,
+            } => {
+                println!("Local track published: {:?}", publication);
+            }
+
+            RoomEvent::TrackSubscribed {
+                track,
+                publication: _,
+                participant: _,
+            } => {
+                println!("Track subscribed: {:?}", track);
+
+                // if let RemoteTrack::Audio(audio_track) = track {
+                //     // Play the audio_track.rtc_track in an async task using cpal.
+                //     play_audio_stream(audio_track).await.unwrap();
+                // }
+            }
+
+            RoomEvent::LocalTrackSubscribed { track } => {
+                println!("Local track subscribed: {:?}", track);
+            }
+
+            RoomEvent::TrackSubscriptionFailed {
+                participant,
+                error,
+                track_sid,
+            } => {
+                println!(
+                    "Track subscription failed: {:?}, {:?}, {:?}",
+                    participant, error, track_sid
+                );
+            }
+
+            RoomEvent::ConnectionQualityChanged {
+                quality: _,
+                participant: _,
+            } => {
+                // Do nothing
+            }
+
+            _ => {
+                println!("Unhandled room event: {:?}", event);
+            }
+        }
+    }
+}
+
+// Keeps sending events to all connected clients.
+async fn send_event_to_clients(
+    service: SharedVoipService,
+    mut event_receiver: UnboundedReceiver<VoipServerEvent>,
+) {
+    while let Some(event) = event_receiver.recv().await {
+        let service_guard = service.lock().await;
+
+        for (client_id, sender) in service_guard.event_sender_of_client.iter() {
+            if let Err(e) = sender.send(Ok(event.clone())).await {
+                error!("Failed to send event to client {}: {}", client_id, e);
+            }
+        }
+    }
+}
+
+// TODO: Take a command channel in order to exit the audio playback loop.
 async fn play_audio_stream(
     audio_track: RemoteAudioTrack,
 ) -> Result<(), Box<dyn std::error::Error>> {
