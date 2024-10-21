@@ -13,7 +13,8 @@ service VoipService {
 
 message ClientInfo {
   string client_id = 1;
-  string room_id = 2;
+  string user_name = 2;
+  string room_id = 3;
 }
 
 message VoipServerEvent {
@@ -51,7 +52,11 @@ message MemberUnmuted { string member_id = 1; }
 
 message MemberSpeaking { string member_id = 1; }
 
-message SendDebugEventPayload { VoipServerEvent.EventType event_type = 1; }
+message SendDebugEventPayload {
+  string client_id = 1;
+  string dest_client_id = 2;
+  VoipServerEvent.EventType event_type = 3;
+}
 
 // Room state snapshot (for initial registration or re-sync)
 message RoomState {

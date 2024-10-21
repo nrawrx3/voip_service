@@ -4,6 +4,8 @@ pub struct ClientInfo {
     #[prost(string, tag = "1")]
     pub client_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
+    pub user_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
     pub room_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -109,9 +111,13 @@ pub struct MemberSpeaking {
     #[prost(string, tag = "1")]
     pub member_id: ::prost::alloc::string::String,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SendDebugEventPayload {
-    #[prost(enumeration = "voip_server_event::EventType", tag = "1")]
+    #[prost(string, tag = "1")]
+    pub client_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub dest_client_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "voip_server_event::EventType", tag = "3")]
     pub event_type: i32,
 }
 /// Room state snapshot (for initial registration or re-sync)

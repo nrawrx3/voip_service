@@ -1,3 +1,4 @@
+use core::error;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::{Stream, StreamExt};
 use livekit::participant::ParticipantKind;
@@ -7,11 +8,13 @@ use livekit::webrtc::native::audio_resampler::AudioResampler;
 use livekit::{Room, RoomEvent, RoomOptions};
 use log::{error, info, warn};
 use reqwest::{Client, StatusCode};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::client;
 use tonic::{transport::Server, Request, Response, Status};
 use wav::WavHeader;
 
@@ -33,6 +36,8 @@ use pb::{ClientInfo, SendDebugEventPayload, VoipServerEvent};
 // Type alias for the streaming server response.
 type ServerEventStream = Pin<Box<dyn Stream<Item = Result<VoipServerEvent, Status>> + Send>>;
 
+type EventSenderChannel = mpsc::Sender<Result<VoipServerEvent, Status>>;
+
 // Main service struct.
 pub struct MyVoipService {
     // Handle to a config object.
@@ -41,10 +46,11 @@ pub struct MyVoipService {
     pub current_room_name: Option<String>,
     pub call_state: CallState,
     pub all_member_names: Vec<String>,
-    pub client: Client,
+    pub http_client: Client,
     pub livekit_token: Option<String>,
     pub current_room: Option<Arc<Room>>,
-    pub event_sender: Option<mpsc::Sender<Result<VoipServerEvent, Status>>>,
+    pub connected_client_ids: Vec<String>,
+    pub event_sender_of_client: HashMap<String, EventSenderChannel>,
 }
 
 type SharedVoipService = Arc<Mutex<MyVoipService>>;
@@ -64,10 +70,11 @@ impl Default for MyVoipService {
             current_room_name: None,
             call_state: CallState::Disconnected,
             all_member_names: vec![],
-            client: Client::new(),
+            http_client: Client::new(),
             livekit_token: None,
             current_room: None,
-            event_sender: None,
+            connected_client_ids: vec![],
+            event_sender_of_client: HashMap::new(),
         }
     }
 }
@@ -82,8 +89,8 @@ impl VoipService for SharedVoipService {
     ) -> Result<Response<Self::JoinRoomStream>, Status> {
         let client_info = request.into_inner();
         println!(
-            "Client {} registered for room {}",
-            client_info.client_id, client_info.room_id
+            "Client {} registered for room {} with user_name {}",
+            client_info.client_id, client_info.room_id, client_info.user_name
         );
 
         // Create a channel to send events to the client.
@@ -92,16 +99,22 @@ impl VoipService for SharedVoipService {
         {
             // Lock the service to store the sender
             let mut service = self.lock().await;
-            service.event_sender = Some(tx.clone()); // Store the sender in the struct
+            service
+                .event_sender_of_client
+                .insert(client_info.client_id.clone(), tx.clone());
         }
 
         // Convert the receiver into a stream.
         let stream = ReceiverStream::new(rx);
 
         // Connect to LiveKit
-        let res =
-            locked_connect_to_livekit(self.clone(), &client_info.client_id, &client_info.room_id)
-                .await;
+        let res = locked_connect_to_livekit(
+            self.clone(),
+            &client_info.client_id,
+            &client_info.user_name,
+            &client_info.room_id,
+        )
+        .await;
 
         let return_value: Result<Response<Self::JoinRoomStream>, Status> = match res {
             Ok(_) => {
@@ -121,19 +134,24 @@ impl VoipService for SharedVoipService {
         // Send a ping event back to the client after 2 seconds.
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            if let Some(sender) = &self_ref.lock().await.event_sender {
-                let event = VoipServerEvent {
-                    event_type: EventType::Ping as i32,
-                    current_user_id: client_info.client_id.clone(),
-                    room_id: client_info.room_id.clone(),
-                    event_payload: None,
-                };
 
-                if sender.send(Ok(event)).await.is_err() {
-                    warn!("Failed to send event to client");
-                } else {
-                    info!("Sent ping event to client");
-                }
+            let service = self_ref.lock().await;
+            let sender = service
+                .event_sender_of_client
+                .get(&client_info.client_id)
+                .unwrap(); // TODO: Remove unwrap from here.
+
+            let event = VoipServerEvent {
+                event_type: EventType::Ping as i32,
+                current_user_id: client_info.user_name.clone(),
+                room_id: client_info.room_id.clone(),
+                event_payload: None,
+            };
+
+            if sender.send(Ok(event)).await.is_err() {
+                warn!("Failed to send event to client");
+            } else {
+                info!("Sent ping event to client");
             }
         });
 
@@ -146,18 +164,16 @@ impl VoipService for SharedVoipService {
     ) -> Result<Response<VoipServerEvent>, Status> {
         let payload = request.into_inner();
 
+        let service = self.lock().await;
+
         // Create the event.
         let voip_service_event = VoipServerEvent {
             event_type: payload.event_type as i32,
-            current_user_id: self
-                .lock()
-                .await
+            current_user_id: service
                 .current_user_name
                 .clone()
                 .unwrap_or("none".to_string()),
-            room_id: self
-                .lock()
-                .await
+            room_id: service
                 .current_room_name
                 .clone()
                 .unwrap_or("none".to_string()),
@@ -166,25 +182,37 @@ impl VoipService for SharedVoipService {
             })),
         };
 
+        let sender = service
+            .event_sender_of_client
+            .get(&payload.dest_client_id)
+            .unwrap(); // TODO: Remove unwrap from here and handle the error.
+
+        info!("Sending debug event to client {}", payload.dest_client_id);
+
         // Send the event using the mpsc sender if available
-        if let Some(sender) = &self.lock().await.event_sender {
-            if sender.send(Ok(voip_service_event.clone())).await.is_err() {
-                warn!("Failed to send event to client");
+        let send_res = sender.send(Ok(voip_service_event.clone())).await;
+
+        match send_res {
+            Ok(_) => Ok(Response::new(voip_service_event)),
+            Err(e) => {
+                error!("Failed to send event to client {}", e);
+                Err(Status::internal("Failed to send event to client"))
             }
         }
-
-        Ok(Response::new(voip_service_event))
     }
 }
 
 pub async fn locked_connect_to_livekit(
     service: SharedVoipService,
+    client_id: &str,
     user_name: &str,
     room_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut service = service.lock().await;
 
-    let result = service.connect_to_livekit(&user_name, &room_name).await;
+    let result = service
+        .connect_to_livekit(&client_id, &user_name, &room_name)
+        .await;
 
     info!("connect_to_livekit call returned");
 
@@ -194,6 +222,7 @@ pub async fn locked_connect_to_livekit(
 impl MyVoipService {
     pub async fn connect_to_livekit(
         &mut self,
+        client_id: &str,
         user_name: &str,
         room_name: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -209,7 +238,7 @@ impl MyVoipService {
 
         info!("Fetching join token from {}", url);
 
-        let resp = self.client.get(url).send().await?;
+        let resp = self.http_client.get(url).send().await?;
         if !matches!(resp.status(), StatusCode::OK) {
             error!(
                 "Failed to get livekit token for room {}. HTTP Error: {}",
