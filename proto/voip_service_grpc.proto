@@ -24,7 +24,7 @@ message VoipServerEvent {
     event_type_member_left = 2;
     event_type_member_muted = 3;
     event_type_member_unmuted = 4;
-    event_type_member_speaking = 5;
+    event_type_active_speakers_changed = 5;
     event_type_current_user_left = 6;
   }
 
@@ -39,6 +39,7 @@ message VoipServerEvent {
     MemberMuted member_muted = 6;
     MemberUnmuted member_unmuted = 7;
     MemberSpeaking member_speaking = 8;
+    ActiveSpeakersChanged active_speakers_changed = 9;
   }
 }
 
@@ -51,6 +52,8 @@ message MemberMuted { string member_id = 1; }
 message MemberUnmuted { string member_id = 1; }
 
 message MemberSpeaking { string member_id = 1; }
+
+message ActiveSpeakersChanged { repeated string active_speaker_ids = 1; }
 
 message SendDebugEventPayload {
   string client_id = 1;

@@ -2,7 +2,7 @@ use core::error;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::future::Shared;
 use futures::{Stream, StreamExt};
-use livekit::participant::ParticipantKind;
+use livekit::participant::{self, ParticipantKind};
 use livekit::track::{RemoteAudioTrack, RemoteTrack};
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::native::audio_resampler::AudioResampler;
@@ -40,6 +40,9 @@ type ServerEventStream = Pin<Box<dyn Stream<Item = Result<VoipServerEvent, Statu
 
 type EventSenderChannel = mpsc::Sender<Result<VoipServerEvent, Status>>;
 
+type ClientAppID = String;
+type RemoteUserName = String;
+
 // Main service struct.
 pub struct MyVoipService {
     // Handle to a config object.
@@ -52,10 +55,13 @@ pub struct MyVoipService {
     pub livekit_token: Option<String>,
     pub current_room: Option<Arc<Room>>,
     pub connected_client_ids: Vec<String>,
-    pub event_sender_of_client: HashMap<String, EventSenderChannel>,
+    pub event_sender_of_client: HashMap<ClientAppID, EventSenderChannel>,
 
     // Used to communicate with the event sender task.
     pub grpc_event_tx: Option<mpsc::UnboundedSender<VoipServerEvent>>,
+
+    // Used to stop the audio thread of the corresponding participant.
+    pub stop_audio_thread_tx_of_user: HashMap<RemoteUserName, tokio::sync::oneshot::Sender<bool>>,
 }
 
 type SharedVoipService = Arc<Mutex<MyVoipService>>;
@@ -81,6 +87,7 @@ impl Default for MyVoipService {
             connected_client_ids: vec![],
             event_sender_of_client: HashMap::new(),
             grpc_event_tx: None,
+            stop_audio_thread_tx_of_user: HashMap::new(),
         }
     }
 }
@@ -386,6 +393,30 @@ async fn handle_room_events(
 
             RoomEvent::ActiveSpeakersChanged { speakers } => {
                 println!("Active speakers changed: {:?}", speakers);
+
+                // Send event_type_active_speakers_changed to all connected clients.
+
+                let mut service_guard = service.lock().await;
+
+                let event = VoipServerEvent {
+                    event_type: EventType::ActiveSpeakersChanged as i32,
+                    current_user_name: current_user_name.to_string(),
+                    current_room_name: current_room_name.to_string(),
+                    event_payload: Some(EventPayload::ActiveSpeakersChanged(
+                        pb::ActiveSpeakersChanged {
+                            active_speaker_ids: speakers
+                                .iter()
+                                .map(|participant| participant.identity().to_string())
+                                .collect(),
+                        },
+                    )),
+                };
+
+                if let Some(grpc_event_tx) = &service_guard.grpc_event_tx {
+                    if let Err(e) = grpc_event_tx.send(event) {
+                        error!("Failed to send event to client: {}", e);
+                    }
+                }
             }
 
             RoomEvent::LocalTrackPublished {
@@ -399,15 +430,53 @@ async fn handle_room_events(
             RoomEvent::TrackSubscribed {
                 track,
                 publication: _,
-                participant: _,
+                participant,
             } => {
-                println!("Track subscribed: {:?}", track);
+                let remote_user_name = participant.identity().as_str().to_string();
 
-                // if let RemoteTrack::Audio(audio_track) = track {
-                //     // Play the audio_track.rtc_track in an async task using cpal.
-                //     play_audio_stream(audio_track).await.unwrap();
-                // }
+                info!(
+                    "Track subscribed from partipant. user_name: {:?}, track_sid: {:?}",
+                    participant.identity(),
+                    track.sid().as_str()
+                );
+
+                if let RemoteTrack::Audio(track) = track {
+                    // > New audio thread
+                    let mut service_guard = service.lock().await;
+
+                    // Check if there's an existing stop signal for the remote user.
+                    if let Some(stop_audio_thread_tx) = service_guard
+                        .stop_audio_thread_tx_of_user
+                        .remove(&remote_user_name)
+                    // Remove before sending the signal
+                    {
+                        // Send a stop signal to the audio thread.
+                        let _ = stop_audio_thread_tx.send(true); // Ignore the result, as the thread might already be stopped.
+                    }
+
+                    // Create a new stop signal for the audio thread.
+                    let (stop_audio_thread_tx, stop_audio_thread_rx) =
+                        tokio::sync::oneshot::channel();
+
+                    // Store the new stop signal in the service.
+                    service_guard
+                        .stop_audio_thread_tx_of_user
+                        .insert(remote_user_name.clone(), stop_audio_thread_tx);
+
+                    let remote_user_name_clone = remote_user_name.clone();
+                    tokio::spawn(
+                        async move { play_audio_stream(track, stop_audio_thread_rx).await },
+                    );
+
+                    // < New audio thread
+                }
             }
+
+            RoomEvent::TrackUnsubscribed {
+                track,
+                publication,
+                participant,
+            } => {}
 
             RoomEvent::LocalTrackSubscribed { track } => {
                 println!("Local track subscribed: {:?}", track);
@@ -457,7 +526,8 @@ async fn send_event_to_clients(
 // TODO: Take a command channel in order to exit the audio playback loop.
 async fn play_audio_stream(
     audio_track: RemoteAudioTrack,
-) -> Result<(), Box<dyn std::error::Error>> {
+    stop_audio_thread_rx: tokio::sync::oneshot::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Start audio stream at time {:?}", std::time::Instant::now());
 
     // Get the default audio output device

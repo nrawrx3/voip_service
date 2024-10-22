@@ -16,7 +16,7 @@ pub struct VoipServerEvent {
     pub current_user_name: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub current_room_name: ::prost::alloc::string::String,
-    #[prost(oneof = "voip_server_event::EventPayload", tags = "4, 5, 6, 7, 8")]
+    #[prost(oneof = "voip_server_event::EventPayload", tags = "4, 5, 6, 7, 8, 9")]
     pub event_payload: ::core::option::Option<voip_server_event::EventPayload>,
 }
 /// Nested message and enum types in `VoipServerEvent`.
@@ -39,7 +39,7 @@ pub mod voip_server_event {
         MemberLeft = 2,
         MemberMuted = 3,
         MemberUnmuted = 4,
-        MemberSpeaking = 5,
+        ActiveSpeakersChanged = 5,
         CurrentUserLeft = 6,
     }
     impl EventType {
@@ -54,7 +54,7 @@ pub mod voip_server_event {
                 Self::MemberLeft => "event_type_member_left",
                 Self::MemberMuted => "event_type_member_muted",
                 Self::MemberUnmuted => "event_type_member_unmuted",
-                Self::MemberSpeaking => "event_type_member_speaking",
+                Self::ActiveSpeakersChanged => "event_type_active_speakers_changed",
                 Self::CurrentUserLeft => "event_type_current_user_left",
             }
         }
@@ -66,7 +66,7 @@ pub mod voip_server_event {
                 "event_type_member_left" => Some(Self::MemberLeft),
                 "event_type_member_muted" => Some(Self::MemberMuted),
                 "event_type_member_unmuted" => Some(Self::MemberUnmuted),
-                "event_type_member_speaking" => Some(Self::MemberSpeaking),
+                "event_type_active_speakers_changed" => Some(Self::ActiveSpeakersChanged),
                 "event_type_current_user_left" => Some(Self::CurrentUserLeft),
                 _ => None,
             }
@@ -84,6 +84,8 @@ pub mod voip_server_event {
         MemberUnmuted(super::MemberUnmuted),
         #[prost(message, tag = "8")]
         MemberSpeaking(super::MemberSpeaking),
+        #[prost(message, tag = "9")]
+        ActiveSpeakersChanged(super::ActiveSpeakersChanged),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -110,6 +112,11 @@ pub struct MemberUnmuted {
 pub struct MemberSpeaking {
     #[prost(string, tag = "1")]
     pub member_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ActiveSpeakersChanged {
+    #[prost(string, repeated, tag = "1")]
+    pub active_speaker_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SendDebugEventPayload {
