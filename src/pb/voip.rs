@@ -16,7 +16,7 @@ pub struct VoipServerEvent {
     pub current_user_name: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub current_room_name: ::prost::alloc::string::String,
-    #[prost(oneof = "voip_server_event::EventPayload", tags = "4, 5, 6, 7, 8, 9")]
+    #[prost(oneof = "voip_server_event::EventPayload", tags = "4, 5, 6, 7, 8")]
     pub event_payload: ::core::option::Option<voip_server_event::EventPayload>,
 }
 /// Nested message and enum types in `VoipServerEvent`.
@@ -83,8 +83,6 @@ pub mod voip_server_event {
         #[prost(message, tag = "7")]
         MemberUnmuted(super::MemberUnmuted),
         #[prost(message, tag = "8")]
-        MemberSpeaking(super::MemberSpeaking),
-        #[prost(message, tag = "9")]
         ActiveSpeakersChanged(super::ActiveSpeakersChanged),
     }
 }
@@ -124,8 +122,8 @@ pub struct SendDebugEventPayload {
     pub client_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub dest_client_id: ::prost::alloc::string::String,
-    #[prost(enumeration = "voip_server_event::EventType", tag = "3")]
-    pub event_type: i32,
+    #[prost(message, optional, tag = "3")]
+    pub event: ::core::option::Option<VoipServerEvent>,
 }
 /// Room state snapshot (for initial registration or re-sync)
 #[derive(Clone, PartialEq, ::prost::Message)]

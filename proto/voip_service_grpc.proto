@@ -38,8 +38,7 @@ message VoipServerEvent {
     MemberLeft member_left = 5;
     MemberMuted member_muted = 6;
     MemberUnmuted member_unmuted = 7;
-    MemberSpeaking member_speaking = 8;
-    ActiveSpeakersChanged active_speakers_changed = 9;
+    ActiveSpeakersChanged active_speakers_changed = 8;
   }
 }
 
@@ -58,7 +57,7 @@ message ActiveSpeakersChanged { repeated string active_speaker_ids = 1; }
 message SendDebugEventPayload {
   string client_id = 1;
   string dest_client_id = 2;
-  VoipServerEvent.EventType event_type = 3;
+  VoipServerEvent event = 3;
 }
 
 // Room state snapshot (for initial registration or re-sync)

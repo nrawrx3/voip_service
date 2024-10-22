@@ -179,21 +179,7 @@ impl VoipService for SharedVoipService {
 
         let service = self.lock().await;
 
-        // Create the event.
-        let voip_service_event = VoipServerEvent {
-            event_type: payload.event_type as i32,
-            current_user_name: service
-                .current_user_name
-                .clone()
-                .unwrap_or("none".to_string()),
-            current_room_name: service
-                .current_room_name
-                .clone()
-                .unwrap_or("none".to_string()),
-            event_payload: Some(EventPayload::MemberJoined(pb::MemberJoined {
-                member_id: "dummy".to_string(),
-            })),
-        };
+        let voip_service_event = payload.event.unwrap();
 
         let sender = service
             .event_sender_of_client
