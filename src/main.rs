@@ -463,10 +463,13 @@ async fn handle_room_events(
                         .stop_audio_thread_tx_of_user
                         .insert(remote_user_name.clone(), stop_audio_thread_tx);
 
-                    let remote_user_name_clone = remote_user_name.clone();
-                    tokio::spawn(
-                        async move { play_audio_stream(track, stop_audio_thread_rx).await },
-                    );
+                    if !service_guard.config.disable_remote_audio_playback {
+                        tokio::spawn(async move {
+                            play_audio_stream(track, stop_audio_thread_rx).await
+                        });
+                    } else {
+                        info!("Remote audio playback DISABLED");
+                    }
 
                     // < New audio thread
                 }
