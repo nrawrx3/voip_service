@@ -2,10 +2,14 @@ use core::error;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures::future::Shared;
 use futures::{Stream, StreamExt};
+use livekit::options::TrackPublishOptions;
 use livekit::participant::{self, ParticipantKind};
-use livekit::track::{RemoteAudioTrack, RemoteTrack};
+use livekit::prelude::LocalParticipant;
+use livekit::track::{self, LocalAudioTrack, RemoteAudioTrack, RemoteTrack};
+use livekit::webrtc::audio_source::native::{self, NativeAudioSource};
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::native::audio_resampler::AudioResampler;
+use livekit::webrtc::prelude::{AudioSourceOptions, RtcAudioSource};
 use livekit::{Room, RoomEvent, RoomOptions};
 use log::{error, info, warn};
 use reqwest::{Client, StatusCode};
@@ -25,6 +29,9 @@ mod wav;
 
 mod config;
 use config::Config;
+
+const SAMPLE_RATE: u32 = 48000;
+const NUM_CHANNELS: u32 = 2;
 
 pub mod pb {
     // tonic::include!("/pb/voip.rs"); // Generated from the proto file
@@ -245,6 +252,8 @@ pub async fn connect_to_livekit(
         Ok((room, mut room_events)) => {
             info!("Connected to LiveKit room {}", room_name);
 
+            let local_participant = room.local_participant();
+
             // Save the room handle and info.
             service_guard.current_user_name = Some(user_name.to_string());
             service_guard.current_room_name = Some(room_name.to_string());
@@ -267,6 +276,11 @@ pub async fn connect_to_livekit(
             let (grpc_event_tx, mut grpc_event_rx) = mpsc::unbounded_channel();
             service_guard.grpc_event_tx = Some(grpc_event_tx);
             tokio::spawn(send_event_to_clients(service.clone(), grpc_event_rx));
+
+            // Start a task to publish the local audio track.
+            publish_local_track(&local_participant).await?;
+
+            info!("Local audio track published");
 
             Ok(())
         }
@@ -613,6 +627,37 @@ async fn play_audio_stream(
             }
         }
     });
+
+    Ok(())
+}
+
+async fn publish_local_track(
+    local_participant: &LocalParticipant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let native_audio_source = NativeAudioSource::new(
+        AudioSourceOptions {
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain_control: true,
+        },
+        SAMPLE_RATE,
+        NUM_CHANNELS,
+        None,
+    );
+
+    let audio_source = RtcAudioSource::Native(native_audio_source);
+
+    let local_audio_track = LocalAudioTrack::create_audio_track("local_track", audio_source);
+
+    let mut track_publish_options = TrackPublishOptions::default();
+    track_publish_options.source = livekit::track::TrackSource::Microphone;
+
+    local_participant
+        .publish_track(
+            track::LocalTrack::Audio(local_audio_track),
+            track_publish_options,
+        )
+        .await?;
 
     Ok(())
 }
