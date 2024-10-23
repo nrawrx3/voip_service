@@ -1,28 +1,26 @@
-use core::error;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use futures::future::Shared;
+use cpal::SampleRate;
 use futures::{Stream, StreamExt};
 use livekit::options::TrackPublishOptions;
-use livekit::participant::{self, ParticipantKind};
+use livekit::participant::{ParticipantKind};
 use livekit::prelude::LocalParticipant;
-use livekit::track::{self, LocalAudioTrack, RemoteAudioTrack, RemoteTrack};
-use livekit::webrtc::audio_source::native::{self, NativeAudioSource};
+use livekit::track::{
+    LocalAudioTrack, LocalTrack, RemoteAudioTrack, RemoteTrack, TrackSource,
+};
+use livekit::webrtc::audio_source::native::{NativeAudioSource};
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::native::audio_resampler::AudioResampler;
-use livekit::webrtc::prelude::{AudioSourceOptions, RtcAudioSource};
+use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
 use livekit::{Room, RoomEvent, RoomOptions};
 use log::{error, info, warn};
 use reqwest::{Client, StatusCode};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::thread::current;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::client;
 use tonic::{transport::Server, Request, Response, Status};
-use wav::WavHeader;
 
 mod model;
 mod wav;
@@ -249,7 +247,7 @@ pub async fn connect_to_livekit(
         Room::connect(&service_guard.config.livekit_endpoint, &token, options).await;
 
     match connect_result {
-        Ok((room, mut room_events)) => {
+        Ok((room, room_events)) => {
             info!("Connected to LiveKit room {}", room_name);
 
             let local_participant = room.local_participant();
@@ -273,14 +271,15 @@ pub async fn connect_to_livekit(
             ));
 
             // Start a task to send grpc events to the client.
-            let (grpc_event_tx, mut grpc_event_rx) = mpsc::unbounded_channel();
+            let (grpc_event_tx, grpc_event_rx) = mpsc::unbounded_channel();
             service_guard.grpc_event_tx = Some(grpc_event_tx);
             tokio::spawn(send_event_to_clients(service.clone(), grpc_event_rx));
 
             // Start a task to publish the local audio track.
-            publish_local_track(&local_participant).await?;
+            // Call the function and handle the error if any
+            tokio::spawn(start_capturing_audio_input(service.clone()));
 
-            info!("Local audio track published");
+            info!("Done starting audio capture");
 
             Ok(())
         }
@@ -396,7 +395,7 @@ async fn handle_room_events(
 
                 // Send event_type_active_speakers_changed to all connected clients.
 
-                let mut service_guard = service.lock().await;
+                let service_guard = service.lock().await;
 
                 let event = VoipServerEvent {
                     event_type: EventType::ActiveSpeakersChanged as i32,
@@ -635,32 +634,117 @@ async fn play_audio_stream(
 }
 
 async fn publish_local_track(
-    local_participant: &LocalParticipant,
-) -> Result<(), Box<dyn std::error::Error>> {
+    local_participant: LocalParticipant,
+    sample_rate: u32,
+    num_channels: u32,
+) -> Result<NativeAudioSource, Box<dyn std::error::Error + Sync + Send>> {
+    // Create a NativeAudioSource
     let native_audio_source = NativeAudioSource::new(
         AudioSourceOptions {
             echo_cancellation: true,
             noise_suppression: true,
             auto_gain_control: true,
         },
-        SAMPLE_RATE,
-        NUM_CHANNELS,
+        sample_rate,
+        num_channels,
         None,
     );
 
-    let audio_source = RtcAudioSource::Native(native_audio_source);
+    let audio_source = RtcAudioSource::Native(native_audio_source.clone());
 
     let local_audio_track = LocalAudioTrack::create_audio_track("local_track", audio_source);
 
     let mut track_publish_options = TrackPublishOptions::default();
-    track_publish_options.source = livekit::track::TrackSource::Microphone;
+    track_publish_options.source = TrackSource::Microphone;
 
+    // Publish the track to LiveKit
     local_participant
-        .publish_track(
-            track::LocalTrack::Audio(local_audio_track),
-            track_publish_options,
-        )
+        .publish_track(LocalTrack::Audio(local_audio_track), track_publish_options)
         .await?;
+
+    info!("Local audio track published");
+
+    Ok(native_audio_source)
+}
+
+async fn start_capturing_audio_input(
+    voip_service: SharedVoipService,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .expect("Failed to get default input device");
+    let mut config: cpal::StreamConfig = device.default_input_config()?.into();
+
+    config.channels = NUM_CHANNELS as u16;
+    config.sample_rate = SampleRate(SAMPLE_RATE);
+
+    // Create a channel for sending frames from the callback to an async task
+    let (tx, mut rx) = mpsc::channel::<AudioFrame>(10);
+
+    // Lock the service to access the room and publish the track
+    let native_audio_source = {
+        let service_guard = voip_service.lock().await;
+
+        if let Some(room) = &service_guard.current_room {
+            let native_audio_source =
+                publish_local_track(room.local_participant(), SAMPLE_RATE, NUM_CHANNELS).await?;
+            native_audio_source
+        } else {
+            return Err("No active room found".into());
+        }
+    };
+
+    // Spawn a separate thread to handle the audio stream
+    std::thread::spawn(move || {
+        let stream = device
+            .build_input_stream(
+                &config,
+                move |data: &[f32], _| {
+                    // Convert PCM samples to i16, assuming they are normalized [-1.0, 1.0] floats
+                    let pcm_samples: Vec<i16> = data
+                        .iter()
+                        .map(|&sample| (sample * i16::MAX as f32) as i16)
+                        .collect();
+
+                    let frame_size = pcm_samples.len();
+
+                    // Create an audio frame for NativeAudioSource
+                    let audio_frame = AudioFrame {
+                        data: pcm_samples.into(),
+                        num_channels: NUM_CHANNELS,
+                        sample_rate: SAMPLE_RATE,
+                        samples_per_channel: (frame_size / NUM_CHANNELS as usize) as u32,
+                    };
+
+                    // Send the audio frame to the async task via the channel
+                    if let Err(e) = tx.try_send(audio_frame) {
+                        eprintln!("Failed to send audio frame: {}", e);
+                    }
+                },
+                move |err| {
+                    eprintln!("Stream error: {}", err);
+                },
+                None,
+            )
+            .expect("Failed to build input stream");
+
+        // Start the stream
+        stream.play().expect("Failed to play the audio stream");
+
+        // Park the thread to keep it alive for audio capture
+        std::thread::park();
+    });
+
+    // Spawn a separate async task to handle audio frames
+    tokio::spawn(async move {
+        while let Some(audio_frame) = rx.recv().await {
+            // Capture the frame asynchronously using NativeAudioSource
+            if let Err(e) = native_audio_source.capture_frame(&audio_frame).await {
+                eprintln!("Failed to capture frame: {}", e);
+            }
+        }
+    });
 
     Ok(())
 }
