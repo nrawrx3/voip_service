@@ -15,6 +15,7 @@ use reqwest::{Client, StatusCode};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
@@ -614,10 +615,20 @@ async fn play_audio_stream(
 
     // Receive new samples from the audio track.
     tokio::spawn(async move {
+        let start_time = std::time::Instant::now();
+        let mut last_dt = std::time::Instant::now();
         loop {
             match audio_stream.next().await {
                 Some(frame) => {
-                    log::info!("Received audio frame with {} samples", frame.data.len());
+                    let new_dt = std::time::Instant::now();
+                    let dt = new_dt - last_dt;
+                    last_dt = new_dt;
+
+                    log::info!(
+                        "Received audio frame with {} samples - {:?}",
+                        frame.data.len(),
+                        dt.as_nanos()
+                    );
 
                     // Wait for the consumed samples buffer to have space
                     // let data_f32 = consumed_samples_buffer_rx.recv().await.unwrap();
@@ -776,13 +787,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a channel to receive shutdown signal from the REPL and close the gRPC server.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    // tokio::spawn({
-    //     let voip_service = voip_service.clone();
-    //     async move {
-    //         repl::start_repl(voip_service, shutdown_tx).await;
-    //     }
-    // });
 
     let addr = "[::1]:50051".parse().unwrap();
 
