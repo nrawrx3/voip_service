@@ -2,12 +2,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleRate;
 use futures::{Stream, StreamExt};
 use livekit::options::TrackPublishOptions;
-use livekit::participant::{ParticipantKind};
+use livekit::participant::ParticipantKind;
 use livekit::prelude::LocalParticipant;
-use livekit::track::{
-    LocalAudioTrack, LocalTrack, RemoteAudioTrack, RemoteTrack, TrackSource,
-};
-use livekit::webrtc::audio_source::native::{NativeAudioSource};
+use livekit::track::{LocalAudioTrack, LocalTrack, RemoteAudioTrack, RemoteTrack, TrackSource};
+use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::native::audio_resampler::AudioResampler;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
@@ -24,6 +22,8 @@ use tonic::{transport::Server, Request, Response, Status};
 
 mod model;
 mod wav;
+
+mod perf_samples;
 
 mod config;
 use config::Config;
@@ -277,9 +277,12 @@ pub async fn connect_to_livekit(
 
             // Start a task to publish the local audio track.
             // Call the function and handle the error if any
-            tokio::spawn(start_capturing_audio_input(service.clone()));
-
-            info!("Done starting audio capture");
+            if service_guard.config.disable_local_audio_capture {
+                info!("Local audio capture DISABLED, not starting audio capture");
+            } else {
+                tokio::spawn(start_capturing_audio_input(service.clone()));
+                info!("Done starting audio capture");
+            }
 
             Ok(())
         }
@@ -554,25 +557,36 @@ async fn play_audio_stream(
     // Build a channel to send audio samples
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<f32>>(10);
 
+    // Double buffer for audio samples. Fresh samples = freshly received samples
+    // from the audio track. Consumed samples = samples that have been sent to
+    // the cpal stream.
+    let (fresh_samples_buffer_tx, mut fresh_samples_buffer_rx) =
+        tokio::sync::mpsc::channel::<Vec<f32>>(2);
+    let (consumed_samples_buffer_tx, mut consumed_samples_buffer_rx) =
+        tokio::sync::mpsc::channel::<Vec<f32>>(2);
+
     // Start a separate thread to handle the audio playback using cpal
     std::thread::spawn(move || {
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if let Ok(samples) = receiver.try_recv() {
-                        info!("Received {} samples from cpal thread", samples.len());
+                    loop {
+                        if let Ok(samples) = receiver.try_recv() {
+                            // info!("Received {} samples from cpal thread", samples.len());
 
-                        for (i, sample) in samples.iter().enumerate() {
-                            if i < data.len() {
-                                data[i] = *sample;
+                            for (i, sample) in samples.iter().enumerate() {
+                                if i < data.len() {
+                                    data[i] = *sample;
+                                }
                             }
-                        }
-                    } else {
-                        // If no new samples, fill with silence.
-                        info!("No new samples, filling with silence");
-                        for sample in data.iter_mut() {
-                            *sample = 0.0;
+                        } else {
+                            // If no new samples, fill with silence.
+                            // info!("No new samples, filling with silence");
+                            // for sample in data.iter_mut() {
+                            //     *sample = 0.0;
+                            // }
+                            break;
                         }
                     }
                 },
@@ -598,12 +612,16 @@ async fn play_audio_stream(
         std::thread::park(); // Thread will sleep here until manually woken
     });
 
-    // Push audio frames to the cpal stream asynchronously
+    // Receive new samples from the audio track.
     tokio::spawn(async move {
         loop {
             match audio_stream.next().await {
                 Some(frame) => {
                     log::info!("Received audio frame with {} samples", frame.data.len());
+
+                    // Wait for the consumed samples buffer to have space
+                    // let data_f32 = consumed_samples_buffer_rx.recv().await.unwrap();
+
                     // Resample the audio frame
                     let data_i16 = resampler.remix_and_resample(
                         &frame.data,
@@ -621,6 +639,7 @@ async fn play_audio_stream(
                         .collect();
 
                     let _ = sender.send(data_f32).await; // Send the f32 samples to the cpal callback
+                                                         // fresh_samples_buffer_tx.send(data_f32).await.unwrap();
                 }
                 None => {
                     info!("No more audio frames to play, closing cpal stream");
