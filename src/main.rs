@@ -636,18 +636,25 @@ async fn play_audio_stream(
     tokio::spawn(async move {
         let start_time = std::time::Instant::now();
         let mut last_dt = std::time::Instant::now();
+
+        let mut printed_audio_frame_info = false;
+
         loop {
             match audio_stream.next().await {
                 Some(frame) => {
-                    let new_dt = std::time::Instant::now();
-                    let dt = new_dt - last_dt;
-                    last_dt = new_dt;
+                    if !printed_audio_frame_info {
+                        let new_dt = std::time::Instant::now();
+                        let dt = new_dt - last_dt;
+                        last_dt = new_dt;
 
-                    log::info!(
-                        "Received audio frame with {} samples - {:?}",
-                        frame.data.len(),
-                        dt.as_nanos()
-                    );
+                        log::info!(
+                            "Receiving audio frame with {} samples - {:?}",
+                            frame.data.len(),
+                            dt.as_nanos()
+                        );
+
+                        printed_audio_frame_info = true;
+                    }
 
                     // Wait for the consumed samples buffer to have space
                     // let data_f32 = consumed_samples_buffer_rx.recv().await.unwrap();
