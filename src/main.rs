@@ -737,8 +737,7 @@ async fn start_capturing_audio_input(
 
         if let Some(room) = &service_guard.current_room {
             let native_audio_source =
-                publish_local_track(room.local_participant(), SAMPLE_RATEpdev, NUM_CHANNELS)
-                    .await?;
+                publish_local_track(room.local_participant(), SAMPLE_RATE, NUM_CHANNELS).await?;
 
             native_audio_source
         } else {
@@ -752,7 +751,7 @@ async fn start_capturing_audio_input(
             .build_input_stream(
                 &config,
                 move |data: &[f32], _| {
-                    info!("Received audio samples from cpal: {}", data.len());
+                    // info!("Received audio samples from cpal: {}", data.len());
 
                     // Convert PCM samples to i16, assuming they are normalized [-1.0, 1.0] floats
                     let pcm_samples: Vec<i16> = data
@@ -793,6 +792,7 @@ async fn start_capturing_audio_input(
     tokio::spawn(async move {
         while let Some(audio_frame) = rx.recv().await {
             // Capture the frame asynchronously using NativeAudioSource
+            info!("Input frame count: {}", audio_frame.data.len());
             if let Err(e) = native_audio_source.capture_frame(&audio_frame).await {
                 eprintln!("Failed to capture frame: {}", e);
             }
