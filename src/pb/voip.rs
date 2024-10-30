@@ -16,7 +16,7 @@ pub struct VoipServerEvent {
     pub current_user_name: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub current_room_name: ::prost::alloc::string::String,
-    #[prost(oneof = "voip_server_event::EventPayload", tags = "4, 5, 6, 7, 8")]
+    #[prost(oneof = "voip_server_event::EventPayload", tags = "4, 5, 6, 7, 8, 9")]
     pub event_payload: ::core::option::Option<voip_server_event::EventPayload>,
 }
 /// Nested message and enum types in `VoipServerEvent`.
@@ -34,7 +34,7 @@ pub mod voip_server_event {
     )]
     #[repr(i32)]
     pub enum EventType {
-        Ping = 0,
+        ClientAppConnected = 0,
         MemberJoined = 1,
         MemberLeft = 2,
         MemberMuted = 3,
@@ -49,7 +49,7 @@ pub mod voip_server_event {
         /// (if the ProtoBuf definition does not change) and safe for programmatic use.
         pub fn as_str_name(&self) -> &'static str {
             match self {
-                Self::Ping => "event_type_ping",
+                Self::ClientAppConnected => "event_type_client_app_connected",
                 Self::MemberJoined => "event_type_member_joined",
                 Self::MemberLeft => "event_type_member_left",
                 Self::MemberMuted => "event_type_member_muted",
@@ -61,7 +61,7 @@ pub mod voip_server_event {
         /// Creates an enum from field names used in the ProtoBuf definition.
         pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
             match value {
-                "event_type_ping" => Some(Self::Ping),
+                "event_type_client_app_connected" => Some(Self::ClientAppConnected),
                 "event_type_member_joined" => Some(Self::MemberJoined),
                 "event_type_member_left" => Some(Self::MemberLeft),
                 "event_type_member_muted" => Some(Self::MemberMuted),
@@ -75,16 +75,27 @@ pub mod voip_server_event {
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum EventPayload {
         #[prost(message, tag = "4")]
-        MemberJoined(super::MemberJoined),
+        ClientAppConnected(super::ClientAppConnected),
         #[prost(message, tag = "5")]
-        MemberLeft(super::MemberLeft),
+        MemberJoined(super::MemberJoined),
         #[prost(message, tag = "6")]
-        MemberMuted(super::MemberMuted),
+        MemberLeft(super::MemberLeft),
         #[prost(message, tag = "7")]
-        MemberUnmuted(super::MemberUnmuted),
+        MemberMuted(super::MemberMuted),
         #[prost(message, tag = "8")]
+        MemberUnmuted(super::MemberUnmuted),
+        #[prost(message, tag = "9")]
         ActiveSpeakersChanged(super::ActiveSpeakersChanged),
     }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ClientAppConnected {
+    #[prost(string, repeated, tag = "1")]
+    pub existing_member_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub existing_active_speaker_ids: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MemberJoined {

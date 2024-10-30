@@ -39,7 +39,7 @@ pub mod pb {
 
 use pb::voip_server_event::{EventPayload, EventType};
 use pb::voip_service_server::{VoipService, VoipServiceServer};
-use pb::{ClientInfo, SendDebugEventPayload, VoipServerEvent};
+use pb::{ClientAppConnected, ClientInfo, SendDebugEventPayload, VoipServerEvent};
 
 // Type alias for the streaming server response.
 type ServerEventStream = Pin<Box<dyn Stream<Item = Result<VoipServerEvent, Status>> + Send>>;
@@ -160,11 +160,30 @@ impl VoipService for SharedVoipService {
                 .get(&client_info.client_id)
                 .unwrap(); // TODO: Remove unwrap from here.
 
+            // Get room info
+            let room_info = service.current_room_info().await.unwrap();
+
+            let active_speaker_ids = room_info
+                .remote_participants
+                .iter()
+                .filter(|participant| participant.is_speaking)
+                .map(|participant| participant.identity.clone())
+                .collect();
+
+            let existing_member_ids = room_info
+                .remote_participants
+                .iter()
+                .map(|participant| participant.identity.clone())
+                .collect();
+
             let event = VoipServerEvent {
-                event_type: EventType::Ping as i32,
+                event_type: EventType::ClientAppConnected as i32,
                 current_user_name: client_info.user_name.clone(),
                 current_room_name: client_info.room_name.clone(),
-                event_payload: None,
+                event_payload: Some(EventPayload::ClientAppConnected(ClientAppConnected {
+                    existing_member_ids,
+                    existing_active_speaker_ids: active_speaker_ids,
+                })),
             };
 
             if sender.send(Ok(event)).await.is_err() {
@@ -718,7 +737,9 @@ async fn start_capturing_audio_input(
 
         if let Some(room) = &service_guard.current_room {
             let native_audio_source =
-                publish_local_track(room.local_participant(), SAMPLE_RATE, NUM_CHANNELS).await?;
+                publish_local_track(room.local_participant(), SAMPLE_RATEpdev, NUM_CHANNELS)
+                    .await?;
+
             native_audio_source
         } else {
             return Err("No active room found".into());
@@ -731,6 +752,8 @@ async fn start_capturing_audio_input(
             .build_input_stream(
                 &config,
                 move |data: &[f32], _| {
+                    info!("Received audio samples from cpal: {}", data.len());
+
                     // Convert PCM samples to i16, assuming they are normalized [-1.0, 1.0] floats
                     let pcm_samples: Vec<i16> = data
                         .iter()

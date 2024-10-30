@@ -19,7 +19,7 @@ message ClientInfo {
 
 message VoipServerEvent {
   enum EventType {
-    event_type_ping = 0;
+    event_type_client_app_connected = 0;
     event_type_member_joined = 1;
     event_type_member_left = 2;
     event_type_member_muted = 3;
@@ -34,12 +34,18 @@ message VoipServerEvent {
   string current_room_name = 3;
 
   oneof event_payload {
-    MemberJoined member_joined = 4;
-    MemberLeft member_left = 5;
-    MemberMuted member_muted = 6;
-    MemberUnmuted member_unmuted = 7;
-    ActiveSpeakersChanged active_speakers_changed = 8;
+    ClientAppConnected client_app_connected = 4;
+    MemberJoined member_joined = 5;
+    MemberLeft member_left = 6;
+    MemberMuted member_muted = 7;
+    MemberUnmuted member_unmuted = 8;
+    ActiveSpeakersChanged active_speakers_changed = 9;
   }
+}
+
+message ClientAppConnected {
+  repeated string existing_member_ids = 1;
+  repeated string existing_active_speaker_ids = 2;
 }
 
 message MemberJoined { string member_id = 1; }
