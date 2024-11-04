@@ -17,7 +17,7 @@ extra arg needs to be passed as env variable.
 export RUSTFLAGS="-C link-args=-ObjC"
 ```
 
-### Run the service
+### Run the service (deprecated: See next section)
 Then
 
 ```
@@ -26,10 +26,24 @@ cargo build
 cargo run
 ```
 
+### Running as a windows service
+
+- Build and ensure the debug exe is at `.\target\debug\voip_service.exe`
+- Run `sc.exe create voipservice binPath= "<project-dir>\target\debug\voip_service.exe"`
+- Start the service with `sc.exe start voipservice`
+- View the log file at `C:\voip_service.log`
+- Stop the service with `sc.exe stop voipservice`
+- Delete the service registration entirely with `sc.exe delete voipservice`
+
+For example
+```
+sc.exe create voipservice binPath= "C:\Users\Soumik\werk\voip_service\target\debug\voip_service.exe"
+```
+
 
 ## Testing with dummy events
 
-The test livekit token/aith server hosted at `lktoken.nrawrx3.xyz` currently 1
+The test livekit token/auth server hosted at `lktoken.nrawrx3.xyz` currently 1
 hardcoded room and 3 hardcoded users. We will probably use our new backend for
 token generation later if we stick to livekit.
 

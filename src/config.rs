@@ -4,6 +4,7 @@ pub struct Config {
     pub livekit_token_endpoint: String,
     pub disable_remote_audio_playback: bool,
     pub disable_local_audio_capture: bool,
+
     pub record_perf_samples: bool,
     pub perf_samples_file: String,
 }
