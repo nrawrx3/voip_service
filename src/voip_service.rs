@@ -793,7 +793,7 @@ async fn start_capturing_audio_input(
     tokio::spawn(async move {
         while let Some(audio_frame) = rx.recv().await {
             // Capture the frame asynchronously using NativeAudioSource
-            info!("Input frame count: {}", audio_frame.data.len());
+            // info!("Input frame count: {}", audio_frame.data.len());
             if let Err(e) = native_audio_source.capture_frame(&audio_frame).await {
                 eprintln!("Failed to capture frame: {}", e);
             }
