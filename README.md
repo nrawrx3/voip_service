@@ -29,7 +29,7 @@ cargo run
 ### Running as a windows service
 
 - Build and ensure the debug exe is at `.\target\debug\voip_service.exe`
-- Run `sc.exe create voipservice binPath= "<project-dir>\target\debug\voip_service.exe"`
+- Run `sc.exe create voipservice binPath= "<project-dir>\target\debug\voip_service.exe"` (Replace <project-dir> with path to checked out repo)
 - Start the service with `sc.exe start voipservice`
 - View the log file at `C:\voip_service.log`
 - Stop the service with `sc.exe stop voipservice`
@@ -63,7 +63,7 @@ GOPATH correctly).
   `{"client_id":"frontend_app","user_name":"alice#123","room_name":"test-room-1"}`.
   This lets you join the test room as user `alice#123`. The `client_id` is
   `frontend_app` is used for keeping track of multiple clients. For now it
-  doesn't matter. This client will now keep receiving events on
+  doesn't matter. This client will now keep receiving events on the gRPC stream.
 
 
 ### Spawn another client for sending dummy events
