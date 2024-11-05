@@ -47,21 +47,21 @@ type RemoteUserName = String;
 pub struct MyVoipService {
     // Handle to a config object.
     config: Config,
-    pub current_user_name: Option<String>,
-    pub current_room_name: Option<String>,
-    pub call_state: CallState,
-    pub all_member_names: Vec<String>,
-    pub http_client: Client,
-    pub livekit_token: Option<String>,
-    pub current_room: Option<Arc<Room>>,
-    pub connected_client_ids: Vec<String>,
+    current_user_name: Option<String>,
+    current_room_name: Option<String>,
+    call_state: CallState,
+    all_member_names: Vec<String>,
+    http_client: Client,
+    livekit_token: Option<String>,
+    current_room: Option<Arc<Room>>,
+    connected_client_ids: Vec<String>,
     pub event_sender_of_client: HashMap<ClientAppID, EventSenderChannel>,
 
     // Used to communicate with the event sender task.
-    pub grpc_event_tx: Option<mpsc::UnboundedSender<VoipServerEvent>>,
+    grpc_event_tx: Option<mpsc::UnboundedSender<VoipServerEvent>>,
 
     // Used to stop the audio thread of the corresponding participant.
-    pub stop_audio_thread_tx_of_user: HashMap<RemoteUserName, tokio::sync::oneshot::Sender<bool>>,
+    stop_audio_thread_tx_of_user: HashMap<RemoteUserName, tokio::sync::oneshot::Sender<bool>>,
 }
 
 pub type SharedVoipService = Arc<Mutex<MyVoipService>>;
@@ -129,7 +129,7 @@ impl VoipService for SharedVoipService {
         )
         .await;
 
-        let return_value: Result<Response<Self::JoinRoomStream>, Status> = match res {
+        let event_stream_result: Result<Response<Self::JoinRoomStream>, Status> = match res {
             Ok(_) => {
                 info!("Connected to LiveKit room {}", client_info.room_name);
                 Ok(Response::new(Box::pin(stream) as Self::JoinRoomStream))
@@ -142,52 +142,47 @@ impl VoipService for SharedVoipService {
 
         info!("Returning from join_room");
 
+        // Send a client_app_connected event back to the client after 2 seconds.
         let self_ref = self.clone();
-
-        // Send a ping event back to the client after 2 seconds.
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
             let service = self_ref.lock().await;
-            let sender = service
-                .event_sender_of_client
-                .get(&client_info.client_id)
-                .unwrap(); // TODO: Remove unwrap from here.
+            if let Some(sender) = service.event_sender_of_client.get(&client_info.client_id) {
+                // Get room info and send event
+                let room_info = service.current_room_info().await.unwrap();
+                let active_speaker_ids = room_info
+                    .remote_participants
+                    .iter()
+                    .filter(|participant| participant.is_speaking)
+                    .map(|participant| participant.identity.clone())
+                    .collect();
 
-            // Get room info
-            let room_info = service.current_room_info().await.unwrap();
+                let existing_member_ids = room_info
+                    .remote_participants
+                    .iter()
+                    .map(|participant| participant.identity.clone())
+                    .collect();
 
-            let active_speaker_ids = room_info
-                .remote_participants
-                .iter()
-                .filter(|participant| participant.is_speaking)
-                .map(|participant| participant.identity.clone())
-                .collect();
+                let event = VoipServerEvent {
+                    event_type: EventType::ClientAppConnected as i32,
+                    current_user_name: client_info.user_name.clone(),
+                    current_room_name: client_info.room_name.clone(),
+                    event_payload: Some(EventPayload::ClientAppConnected(ClientAppConnected {
+                        existing_member_ids,
+                        existing_active_speaker_ids: active_speaker_ids,
+                    })),
+                };
 
-            let existing_member_ids = room_info
-                .remote_participants
-                .iter()
-                .map(|participant| participant.identity.clone())
-                .collect();
-
-            let event = VoipServerEvent {
-                event_type: EventType::ClientAppConnected as i32,
-                current_user_name: client_info.user_name.clone(),
-                current_room_name: client_info.room_name.clone(),
-                event_payload: Some(EventPayload::ClientAppConnected(ClientAppConnected {
-                    existing_member_ids,
-                    existing_active_speaker_ids: active_speaker_ids,
-                })),
-            };
-
-            if sender.send(Ok(event)).await.is_err() {
-                warn!("Failed to send event to client");
-            } else {
-                info!("Sent ping event to client");
+                if sender.send(Ok(event)).await.is_err() {
+                    warn!("Failed to send event to client");
+                } else {
+                    info!("Sent ping event to client");
+                }
             }
         });
 
-        return_value
+        event_stream_result
     }
 
     async fn send_debug_event_to_client(

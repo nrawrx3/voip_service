@@ -101,10 +101,13 @@ fn my_service_main(_arguments: Vec<OsString>) -> Result<(), windows_service::Err
         info!("Starting grpc server at {}", addr);
 
         let result = Server::builder()
-            .add_service(VoipServiceServer::new(voip_service))
+            .add_service(VoipServiceServer::new(voip_service.clone()))
             .serve_with_shutdown(addr, async {
                 shutdown_from_scm_rx.await.ok(); // Await the shutdown signal
                 info!("Shutting down grpc server");
+
+                // Drop all client event senders, which will close their streams
+                voip_service.lock().await.event_sender_of_client.clear();
             })
             .await;
 
