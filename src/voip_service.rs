@@ -569,9 +569,9 @@ async fn play_audio_stream(
     // Double buffer for audio samples. Fresh samples = freshly received samples
     // from the audio track. Consumed samples = samples that have been sent to
     // the cpal stream.
-    let (fresh_samples_buffer_tx, mut fresh_samples_buffer_rx) =
+    let (fresh_samples_buffer_tx, fresh_samples_buffer_rx) =
         tokio::sync::mpsc::channel::<Vec<f32>>(2);
-    let (consumed_samples_buffer_tx, mut consumed_samples_buffer_rx) =
+    let (consumed_samples_buffer_tx, consumed_samples_buffer_rx) =
         tokio::sync::mpsc::channel::<Vec<f32>>(2);
 
     // Start a separate thread to handle the audio playback using cpal

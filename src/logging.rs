@@ -1,5 +1,4 @@
 use env_logger::{Builder, Target};
-use log::{error, info};
 use std::fs::File;
 use std::io::{self, Write};
 use std::sync::Mutex;
