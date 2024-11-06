@@ -1,7 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleRate;
+use futures::future::{join_all, poll_fn};
 use futures::{Stream, StreamExt};
-use livekit::options::TrackPublishOptions;
+use livekit::options::{audio, TrackPublishOptions};
 use livekit::participant::ParticipantKind;
 use livekit::prelude::LocalParticipant;
 use livekit::track::{LocalAudioTrack, LocalTrack, RemoteAudioTrack, RemoteTrack, TrackSource};
@@ -11,16 +12,22 @@ use livekit::webrtc::native::audio_resampler::AudioResampler;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
 use livekit::{Room, RoomEvent, RoomOptions};
 use log::{error, info, warn};
+use pool::Pool;
 use reqwest::{Client, StatusCode};
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use std::time::Duration;
+use std::vec;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tonic::{Request, Response, Status};
 
 const SAMPLE_RATE: u32 = 48000;
+const SAMPLES_PER_10_MS: u32 = SAMPLE_RATE / 100; // 480 samples per 10ms
+const SAMPLES_PER_100_MS: u32 = SAMPLES_PER_10_MS * 10; // 4800 samples per 100ms
 const NUM_CHANNELS: u32 = 2;
 
 pub mod pb {
@@ -62,6 +69,11 @@ pub struct MyVoipService {
 
     // Used to stop the audio thread of the corresponding participant.
     stop_audio_thread_tx_of_user: HashMap<RemoteUserName, tokio::sync::oneshot::Sender<bool>>,
+
+    audio_frame_sender: tokio::sync::mpsc::Sender<FrameArray>,
+    audio_frame_receiver: Option<tokio::sync::mpsc::Receiver<FrameArray>>, // Moved after we start the audio thread.
+
+    frame_combiner: Option<SharedFrameCombiner>,
 }
 
 pub type SharedVoipService = Arc<Mutex<MyVoipService>>;
@@ -75,6 +87,8 @@ pub enum CallState {
 
 impl Default for MyVoipService {
     fn default() -> Self {
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(100);
+
         MyVoipService {
             config: Config::from_env_variables(),
             current_user_name: None,
@@ -88,6 +102,9 @@ impl Default for MyVoipService {
             event_sender_of_client: HashMap::new(),
             grpc_event_tx: None,
             stop_audio_thread_tx_of_user: HashMap::new(),
+            frame_combiner: None,
+            audio_frame_sender: frame_tx,
+            audio_frame_receiver: Some(frame_rx),
         }
     }
 }
@@ -259,8 +276,6 @@ pub async fn connect_to_livekit(
         Ok((room, room_events)) => {
             info!("Connected to LiveKit room {}", room_name);
 
-            let local_participant = room.local_participant();
-
             // Save the room handle and info.
             service_guard.current_user_name = Some(user_name.to_string());
             service_guard.current_room_name = Some(room_name.to_string());
@@ -304,6 +319,27 @@ pub async fn connect_to_livekit(
 }
 
 impl MyVoipService {
+    pub fn start_audio_playback(&mut self) {
+        // Start the audio playback thread.
+        let frame_receiver = self.audio_frame_receiver.take().unwrap();
+        spawn_cpal_playback_thread(frame_receiver);
+
+        info!("Started cpal playback thread");
+
+        let frame_combiner = SharedFrameCombiner::new();
+
+        self.frame_combiner = Some(SharedFrameCombiner(frame_combiner.0.clone()));
+
+        let audio_frame_sender = self.audio_frame_sender.clone();
+
+        // Start the frame combiner task.
+        tokio::task::spawn_local(
+            async move { frame_combiner.keep_polling(audio_frame_sender).await },
+        );
+
+        info!("Started frame combiner polling task");
+    }
+
     // Method to print room info (list of participants)
     pub async fn current_room_info(&self) -> Result<model::RoomInfo, &'static str> {
         if self.current_room.is_none() {
@@ -537,6 +573,66 @@ async fn send_event_to_clients(
     }
 }
 
+fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<FrameArray>) {
+    // Get the default audio output device
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .expect("Failed to find default output device");
+
+    // Set up the output format
+    let mut config: cpal::StreamConfig = device
+        .default_output_config()
+        .expect("Failed to get default device output config")
+        .into();
+
+    config.channels = NUM_CHANNELS as u16;
+    config.sample_rate = SampleRate(SAMPLE_RATE);
+
+    // Start a separate thread to handle the audio playback using cpal
+    std::thread::spawn(move || {
+        let mut frame_receiver = frame_receiver;
+        let stream = device
+            .build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    loop {
+                        if let Ok(frame_array) = frame_receiver.try_recv() {
+                            // info!("Received {} samples from cpal thread", samples.len());
+
+                            for (i, sample) in frame_array.data.iter().enumerate() {
+                                if i < data.len() {
+                                    data[i] = *sample;
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                },
+                move |err| {
+                    eprintln!("Error occurred on stream: {}", err);
+                },
+                None, // No timeout needed here
+            )
+            .unwrap();
+
+        // Start the stream in the separate thread
+        if let Err(err) = stream.play() {
+            error!(
+                "Failed to play audio stream on device: {}, error: {}",
+                device.name().unwrap(),
+                err
+            );
+        } else {
+            info!("Playing audio stream on device: {}", device.name().unwrap());
+        }
+
+        // Keep the thread alive for the duration of the stream
+        std::thread::park();
+    });
+}
+
 // TODO: Take a command channel in order to exit the audio playback loop.
 async fn play_audio_stream(
     audio_track: RemoteAudioTrack,
@@ -553,8 +649,8 @@ async fn play_audio_stream(
     // Set up the output format
     let config = device.default_output_config()?.into();
 
-    let sample_rate = 48000;
-    let bit_depth = 16;
+    let sample_rate = SAMPLE_RATE;
+    // let bit_depth = 16;
     let num_channels = 2;
 
     // Set up the resampler
@@ -565,14 +661,6 @@ async fn play_audio_stream(
 
     // Build a channel to send audio samples
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<f32>>(10);
-
-    // Double buffer for audio samples. Fresh samples = freshly received samples
-    // from the audio track. Consumed samples = samples that have been sent to
-    // the cpal stream.
-    let (fresh_samples_buffer_tx, fresh_samples_buffer_rx) =
-        tokio::sync::mpsc::channel::<Vec<f32>>(2);
-    let (consumed_samples_buffer_tx, consumed_samples_buffer_rx) =
-        tokio::sync::mpsc::channel::<Vec<f32>>(2);
 
     // Start a separate thread to handle the audio playback using cpal
     std::thread::spawn(move || {
@@ -796,4 +884,108 @@ async fn start_capturing_audio_input(
     });
 
     Ok(())
+}
+
+const AUDIO_FRAME_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Debug)]
+struct FrameArray {
+    data: [f32; (SAMPLES_PER_10_MS * NUM_CHANNELS) as usize],
+}
+
+impl FrameArray {
+    fn new() -> Self {
+        FrameArray {
+            data: [0.0; (SAMPLES_PER_10_MS * NUM_CHANNELS) as usize],
+        }
+    }
+}
+
+impl Default for FrameArray {
+    fn default() -> Self {
+        FrameArray {
+            data: [0.0; (SAMPLES_PER_10_MS * NUM_CHANNELS) as usize],
+        }
+    }
+}
+
+impl Clone for FrameArray {
+    fn clone(&self) -> Self {
+        FrameArray { data: self.data }
+    }
+}
+
+// A struct to combine audio frames from multiple audio streams.
+#[derive(Debug)]
+struct FrameCombiner {
+    // TODO: Instead of audio_streams vec, use a hashmap with the track sid as
+    // the key and allow removal of streams when track is unsubscribed.
+    audio_streams: Vec<NativeAudioStream>,
+}
+
+struct SharedFrameCombiner(Arc<std::sync::Mutex<FrameCombiner>>);
+
+impl SharedFrameCombiner {
+    fn new() -> Self {
+        let fc = FrameCombiner {
+            audio_streams: vec![],
+        };
+
+        SharedFrameCombiner(Arc::new(std::sync::Mutex::new(fc)))
+    }
+
+    async fn add_audio_stream(&self, audio_stream: NativeAudioStream) {
+        let mut fc_mutex_guard = self.0.lock().expect("Failed to lock frame combiner");
+        fc_mutex_guard.audio_streams.push(audio_stream);
+    }
+
+    async fn keep_polling(&self, frame_sender: tokio::sync::mpsc::Sender<FrameArray>) {
+        let mut interval = tokio::time::interval(AUDIO_FRAME_POLL_INTERVAL);
+        tokio::pin!(interval);
+
+        loop {
+            interval.as_mut().tick().await;
+
+            // Lock the state to access the audio streams
+            let mut self_guard = self.0.lock().expect("Failed to lock frame combiner");
+
+            // Allocate a new mix buffer for mixing audio frames
+            let mut mix_buffer = FrameArray::new();
+
+            // Iterate over audio streams and poll for frames
+            for audio_stream in self_guard.audio_streams.iter_mut() {
+                // Poll for the next frame without blocking
+                let mut frame_future = audio_stream.next();
+
+                // Poll the future directly
+                let frame = poll_fn(|cx| Pin::new(&mut frame_future).poll(cx)).await;
+
+                // Process the frame if it exists
+                if let Some(frame) = frame {
+                    // Ensure the frame has the correct number of samples
+                    if frame.data.len() != (SAMPLES_PER_10_MS * 2) as usize {
+                        error!(
+                            "Received frame with {} samples, expected {}",
+                            frame.data.len(),
+                            SAMPLES_PER_10_MS * 2
+                        );
+                        continue;
+                    }
+
+                    // Add the frame to the mix buffer
+                    for (i, sample) in frame.data.iter().enumerate() {
+                        mix_buffer.data[i] += (*sample as f32) / i16::MAX as f32;
+                    }
+                } else {
+                    // Handle the case where the stream has ended or timed out
+                    warn!("Audio stream ended or timed out");
+                }
+            }
+
+            // Send the mix buffer to the mixed frame producer
+            if let Err(e) = frame_sender.send(mix_buffer).await {
+                error!("Failed to send frame: {:?}", e);
+            }
+        }
+    }
 }

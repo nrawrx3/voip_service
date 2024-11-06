@@ -1,7 +1,7 @@
 {
   "editor.formatOnSave": true,
-  // "rust-analyzer.check.extraArgs": [
-  //   "--target-dir",
-  //   "/tmp/rust-analyzer-check"
-  // ]
+  "rust-analyzer.check.extraArgs": [
+    "--target-dir",
+    "/tmp/rust-analyzer-check"
+  ]
 }

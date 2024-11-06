@@ -12,9 +12,11 @@ futures = "0.3.31"
 livekit = { version = "0.6.0", features = ["native-tls"] }
 log = "0.4.22"
 minstant = "0.1.7"
+pool = "0.1.4"
 prettytable-rs = "0.10.0"
 prost = "0.13.3"
 reqwest = "0.12.8"
+ringbuf = "0.4.7"
 rustyline = "14.0.0"
 serde = "1.0.213"
 tokio = { version = "1.40.0", features = ["full", "rt-multi-thread"] }

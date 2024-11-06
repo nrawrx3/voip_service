@@ -1,6 +1,7 @@
 use log::info;
+use ringbuf::rb::local;
 use std::sync::Arc;
-use tokio::{runtime::Runtime, sync::Mutex};
+use tokio::{runtime::Runtime, sync::Mutex, task::LocalSet};
 use tonic::transport::Server;
 
 use crate::voip_service::{pb::voip_service_server::VoipServiceServer, MyVoipService};
@@ -21,6 +22,15 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async {
         let voip_service = Arc::new(Mutex::new(MyVoipService::default()));
+
+        let local_set = LocalSet::new();
+
+        let vs_clone = voip_service.clone();
+
+        local_set.spawn_local(async move {
+            vs_clone.lock().await.start_audio_playback();
+        });
+
         let addr = "[::1]:50051".parse().unwrap();
         info!("Starting grpc server at {}", addr);
 
