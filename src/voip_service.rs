@@ -420,6 +420,8 @@ async fn handle_room_events(
 
                 let mut service_guard = service.lock().await;
 
+                println!("Acquired lock before sending member_joined event");
+
                 service_guard
                     .all_member_names
                     .push(participant.identity().to_string());
@@ -439,6 +441,8 @@ async fn handle_room_events(
                         error!("Failed to send event to client: {}", e);
                     }
                 }
+
+                info!("Sent member_joined event to all clients");
             }
 
             RoomEvent::ParticipantDisconnected(participant) => {
@@ -518,8 +522,14 @@ async fn handle_room_events(
                 );
 
                 if let RemoteTrack::Audio(track) = track {
+                    info!(
+                        "Acquiring lock: Received audio track from remote user: {}",
+                        remote_user_name
+                    );
                     // > New audio thread
                     let mut service_guard = service.lock().await;
+
+                    info!("Acquired lock for handling audio frame");
 
                     // Check if there's an existing stop signal for the remote user.
                     if let Some(stop_audio_thread_tx) = service_guard
@@ -999,7 +1009,7 @@ impl SharedFrameCombiner {
     }
 
     async fn keep_polling(&self, frame_sender: tokio::sync::mpsc::Sender<FrameArray>) {
-        let mut interval = tokio::time::interval(AUDIO_FRAME_POLL_INTERVAL);
+        let interval = tokio::time::interval(AUDIO_FRAME_POLL_INTERVAL);
         tokio::pin!(interval);
 
         info!("Starting audio frame polling loop");
