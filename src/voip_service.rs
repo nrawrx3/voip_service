@@ -804,14 +804,19 @@ async fn handle_audio_frame(
     voip_service: SharedVoipService,
     audio_track: RemoteAudioTrack,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut audio_stream = NativeAudioStream::new(
+    // Add it to the frame combiner
+    let guard = voip_service.lock().await;
+
+    if guard.config.disable_remote_audio_playback {
+        info!("Remote audio playback DISABLED, not adding audio stream to frame combiner");
+        return Ok(());
+    }
+
+    let audio_stream = NativeAudioStream::new(
         audio_track.rtc_track(),
         SAMPLE_RATE as i32,
         NUM_CHANNELS as i32,
     );
-
-    // Add it to the frame combiner
-    let guard = voip_service.lock().await;
 
     if let Some(frame_combiner) = &guard.frame_combiner {
         frame_combiner.add_audio_stream(audio_stream).await;
