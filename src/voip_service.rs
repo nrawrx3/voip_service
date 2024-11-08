@@ -10,6 +10,7 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::native::audio_resampler::AudioResampler;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
+use livekit::webrtc::stats::dictionaries::AudioPlayoutStats;
 use livekit::{Room, RoomEvent, RoomOptions};
 use log::{error, info, warn};
 use pool::Pool;
@@ -22,6 +23,7 @@ use std::time::Duration;
 use std::vec;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tonic::{Request, Response, Status};
 
@@ -318,27 +320,55 @@ pub async fn connect_to_livekit(
     }
 }
 
-impl MyVoipService {
-    pub fn start_audio_playback(&mut self) {
-        // Start the audio playback thread.
-        let frame_receiver = self.audio_frame_receiver.take().unwrap();
+pub async fn start_audio_playback(service: SharedVoipService) -> JoinHandle<()> {
+    let frame_combiner = SharedFrameCombiner::new();
+
+    let mut audio_frame_sender = None;
+
+    {
+        let mut guard = service.lock().await;
+
+        let frame_receiver = guard.audio_frame_receiver.take().unwrap();
         spawn_cpal_playback_thread(frame_receiver);
 
+        audio_frame_sender = Some(guard.audio_frame_sender.clone());
+
+        guard.frame_combiner = Some(SharedFrameCombiner(frame_combiner.0.clone()));
+
         info!("Started cpal playback thread");
-
-        let frame_combiner = SharedFrameCombiner::new();
-
-        self.frame_combiner = Some(SharedFrameCombiner(frame_combiner.0.clone()));
-
-        let audio_frame_sender = self.audio_frame_sender.clone();
-
-        // Start the frame combiner task.
-        tokio::task::spawn_local(
-            async move { frame_combiner.keep_polling(audio_frame_sender).await },
-        );
-
-        info!("Started frame combiner polling task");
     }
+
+    // Start the frame combiner task.
+    tokio::task::spawn_local(async move {
+        info!("Starting frame combiner polling task in local set");
+        frame_combiner
+            .keep_polling(audio_frame_sender.unwrap())
+            .await
+    })
+}
+
+impl MyVoipService {
+    // pub async fn start_audio_playback(&mut self) {
+    //     // Start the audio playback thread.
+    //     let frame_receiver = self.audio_frame_receiver.take().unwrap();
+    //     spawn_cpal_playback_thread(frame_receiver);
+
+    //     info!("Started cpal playback thread");
+
+    //     let frame_combiner = SharedFrameCombiner::new();
+
+    //     self.frame_combiner = Some(SharedFrameCombiner(frame_combiner.0.clone()));
+
+    //     let audio_frame_sender = self.audio_frame_sender.clone();
+
+    //     // Start the frame combiner task.
+    //     let result = tokio::task::spawn_local(async move {
+    //         info!("Starting frame combiner polling task in local set");
+    //         frame_combiner.keep_polling(audio_frame_sender).await
+    //     })
+    //     .await;
+    //     // info!("Started frame combiner polling task");
+    // }
 
     // Method to print room info (list of participants)
     pub async fn current_room_info(&self) -> Result<model::RoomInfo, &'static str> {
@@ -943,11 +973,17 @@ impl SharedFrameCombiner {
         let mut interval = tokio::time::interval(AUDIO_FRAME_POLL_INTERVAL);
         tokio::pin!(interval);
 
+        info!("Starting audio frame polling loop");
+
         loop {
             interval.as_mut().tick().await;
 
+            info!("Polling for audio frames");
+
             // Lock the state to access the audio streams
             let mut self_guard = self.0.lock().expect("Failed to lock frame combiner");
+
+            info!("Acquired lock for audio streams");
 
             // Allocate a new mix buffer for mixing audio frames
             let mut mix_buffer = FrameArray::new();

@@ -4,10 +4,13 @@ use std::sync::Arc;
 use tokio::{runtime::Runtime, sync::Mutex, task::LocalSet};
 use tonic::transport::Server;
 
-use crate::voip_service::{pb::voip_service_server::VoipServiceServer, MyVoipService};
+use crate::voip_service::{
+    pb::voip_service_server::VoipServiceServer, start_audio_playback, MyVoipService,
+};
 
 pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+    console_subscriber::init();
 
     let rt = Runtime::new().expect("Failed to create tokio runtime");
     info!("Tokio runtime created.");
@@ -23,31 +26,32 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
     rt.block_on(async {
         let voip_service = Arc::new(Mutex::new(MyVoipService::default()));
 
-        let local_set = LocalSet::new();
-
         let vs_clone = voip_service.clone();
 
-        local_set.spawn_local(async move {
-            vs_clone.lock().await.start_audio_playback();
-        });
+        let local_set = LocalSet::new();
+        local_set.spawn_local(async move { start_audio_playback(vs_clone).await });
 
         let addr = "[::1]:50051".parse().unwrap();
         info!("Starting grpc server at {}", addr);
 
-        let result = Server::builder()
-            .add_service(VoipServiceServer::new(voip_service.clone()))
-            .serve_with_shutdown(addr, async {
-                ctrlc_rx.changed().await.ok(); // Await the shutdown signal.
+        let grpc_server_future = tokio::spawn(async move {
+            Server::builder()
+                .add_service(VoipServiceServer::new(voip_service.clone()))
+                .serve_with_shutdown(addr, async move {
+                    ctrlc_rx.changed().await.ok(); // Await the shutdown signal.
 
-                // Drop all client event senders, which will close their streams.
-                voip_service.lock().await.event_sender_of_client.clear();
-            })
-            .await;
+                    // Drop all client event senders, which will close their streams.
+                    voip_service.lock().await.event_sender_of_client.clear();
+                })
+                .await
+                .expect("Error shutting down grpc server");
+        });
 
-        match result {
-            Ok(_) => info!("Server shutdown successfully"),
-            Err(e) => info!("Server shutdown with error: {:?}", e),
-        }
+        // // Join all
+        let result = tokio::join!(local_set, grpc_server_future);
+        // result.1.expect("Error closing tasks");
+
+        info!("Audio playback task finished.");
     });
 
     Ok(())
