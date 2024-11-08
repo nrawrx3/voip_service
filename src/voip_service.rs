@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::SampleRate;
+use cpal::{SampleRate, SupportedOutputConfigs};
 use futures::future::{join_all, poll_fn};
 use futures::{Stream, StreamExt};
 use livekit::options::{audio, TrackPublishOptions};
@@ -622,14 +622,57 @@ fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<Fr
         .default_output_device()
         .expect("Failed to find default output device");
 
-    // Set up the output format
-    let mut config: cpal::StreamConfig = device
-        .default_output_config()
-        .expect("Failed to get default device output config")
-        .into();
+    let mut must_have_config = None;
 
-    config.channels = NUM_CHANNELS as u16;
-    config.sample_rate = SampleRate(SAMPLE_RATE);
+    // Seems like the buffer size is provided as bytes in SupportedStreamConfig while in StreamConfig it should be provided as samples.
+    let wanted_buffer_size = (SAMPLES_PER_10_MS * NUM_CHANNELS) * 4; // 4 bytes per f32 sample
+
+    // Print all output configs supported. Choose one with our SAMPLE_RATE and NUM_CHANNELS=2 and buffer size of 10ms = 480 samples => 480 * 2 = 960 f32 scalars.
+    let output_configs = device.supported_output_configs().unwrap();
+    for config in output_configs {
+        info!("Supported output config: {:?}", config);
+
+        if must_have_config.is_some() {
+            continue;
+        }
+
+        let sr_min = config.min_sample_rate();
+        let sr_max = config.max_sample_rate();
+
+        let sr_buffer_size = match config.buffer_size().clone() {
+            cpal::SupportedBufferSize::Range { min, max } => {
+                if min <= wanted_buffer_size && wanted_buffer_size <= max {
+                    Some(wanted_buffer_size)
+                } else {
+                    None
+                }
+            }
+
+            cpal::SupportedBufferSize::Unknown => None,
+        };
+
+        // Usually we will have 48k sample rate and 2 channels. Hardcoding it for that.
+        if sr_min == SampleRate(SAMPLE_RATE)
+            && sr_max == SampleRate(SAMPLE_RATE)
+            && sr_buffer_size.is_some()
+        {
+            must_have_config = Some(cpal::StreamConfig {
+                channels: NUM_CHANNELS as u16,
+                sample_rate: SampleRate(SAMPLE_RATE),
+                buffer_size: cpal::BufferSize::Fixed(SAMPLES_PER_10_MS),
+            });
+        }
+    }
+
+    // Set up the output format
+    // let mut config: cpal::StreamConfig = device
+    //     .default_output_config()
+    //     .expect("Failed to get default device output config")
+    //     .into();
+
+    let mut config = must_have_config.expect("Failed to find suitable output config");
+
+    info!("Using output config: {:?}", config);
 
     // Start a separate thread to handle the audio playback using cpal
     std::thread::spawn(move || {
@@ -637,19 +680,17 @@ fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<Fr
         let stream = device
             .build_output_stream(
                 &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    loop {
-                        if let Ok(frame_array) = frame_receiver.try_recv() {
-                            // info!("Received {} samples from cpal thread", samples.len());
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| loop {
+                    if let Ok(frame_array) = frame_receiver.try_recv() {
+                        // info!("cpal device buffer length = {}", data.len());
 
-                            for (i, sample) in frame_array.data.iter().enumerate() {
-                                if i < data.len() {
-                                    data[i] = *sample;
-                                }
+                        for (i, sample) in frame_array.data.iter().enumerate() {
+                            if i < data.len() {
+                                data[i] = *sample;
                             }
-                        } else {
-                            break;
                         }
+                    } else {
+                        break;
                     }
                 },
                 move |err| {
