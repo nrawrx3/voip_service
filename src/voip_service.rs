@@ -10,10 +10,8 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::webrtc::native::audio_resampler::AudioResampler;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
-use livekit::webrtc::stats::dictionaries::AudioPlayoutStats;
 use livekit::{Room, RoomEvent, RoomOptions};
 use log::{error, info, warn};
-use pool::Pool;
 use reqwest::{Client, StatusCode};
 use std::collections::HashMap;
 use std::future::Future;
@@ -914,10 +912,54 @@ async fn start_capturing_audio_input(
     let device = host
         .default_input_device()
         .expect("Failed to get default input device");
-    let mut config: cpal::StreamConfig = device.default_input_config()?.into();
 
-    config.channels = NUM_CHANNELS as u16;
-    config.sample_rate = SampleRate(SAMPLE_RATE);
+    // Loop through each supported config and find the one that exactly matches
+    // our hardcoded values.
+
+    let supported_input_configs = device.supported_input_configs()?;
+
+    let mut must_have_config = None;
+
+    let wanted_buffer_size = (SAMPLES_PER_10_MS * NUM_CHANNELS) * 4; // 4 bytes per f32 sample
+
+    for config in supported_input_configs {
+        info!("Supported input config: {:?}", config);
+
+        if must_have_config.is_some() {
+            continue;
+        }
+
+        let sr_min = config.min_sample_rate();
+        let sr_max = config.max_sample_rate();
+
+        let sr_buffer_size = match config.buffer_size().clone() {
+            cpal::SupportedBufferSize::Range { min, max } => {
+                if min <= wanted_buffer_size && wanted_buffer_size <= max {
+                    Some(SAMPLES_PER_10_MS)
+                } else {
+                    None
+                }
+            }
+
+            cpal::SupportedBufferSize::Unknown => None,
+        };
+
+        // Usually we will have 48k sample rate and 2 channels. Hardcoding it for that.
+        if sr_min == SampleRate(SAMPLE_RATE)
+            && sr_max == SampleRate(SAMPLE_RATE)
+            && sr_buffer_size.is_some()
+        {
+            must_have_config = Some(cpal::StreamConfig {
+                channels: NUM_CHANNELS as u16,
+                sample_rate: SampleRate(SAMPLE_RATE),
+                buffer_size: cpal::BufferSize::Fixed(SAMPLES_PER_10_MS),
+            });
+        }
+    }
+
+    // let mut config: cpal::StreamConfig = device.default_input_config()?.into();
+
+    let config = must_have_config.expect("Failed to find suitable input config");
 
     // Create a channel for sending frames from the callback to an async task
     let (tx, mut rx) = mpsc::channel::<AudioFrame>(10);

@@ -2282,12 +2282,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pool"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7ac1531a0016945992b4e816e81538dfad0b9f00d280bcb707d711839f1536d"
-
-[[package]]
 name = "portable-atomic"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3598,7 +3592,6 @@ dependencies = [
  "livekit",
  "log",
  "minstant",
- "pool",
  "prettytable-rs",
  "prost 0.13.3",
  "reqwest 0.12.8",
