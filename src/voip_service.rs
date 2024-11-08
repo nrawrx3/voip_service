@@ -542,9 +542,8 @@ async fn handle_room_events(
                         .insert(remote_user_name.clone(), stop_audio_thread_tx);
 
                     if !service_guard.config.disable_remote_audio_playback {
-                        let service = service.clone();
                         // play_audio_stream(track, stop_audio_thread_rx).await
-                        handle_audio_frame(service, track)
+                        handle_audio_frame(&mut service_guard, track)
                             .await
                             .expect("Failed to handle audio frame");
                     } else {
@@ -801,13 +800,11 @@ async fn play_audio_stream(
 }
 
 async fn handle_audio_frame(
-    voip_service: SharedVoipService,
+    voip_service: &mut MyVoipService,
     audio_track: RemoteAudioTrack,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Add it to the frame combiner
-    let guard = voip_service.lock().await;
-
-    if guard.config.disable_remote_audio_playback {
+    if voip_service.config.disable_remote_audio_playback {
         info!("Remote audio playback DISABLED, not adding audio stream to frame combiner");
         return Ok(());
     }
@@ -818,7 +815,7 @@ async fn handle_audio_frame(
         NUM_CHANNELS as i32,
     );
 
-    if let Some(frame_combiner) = &guard.frame_combiner {
+    if let Some(frame_combiner) = &voip_service.frame_combiner {
         frame_combiner.add_audio_stream(audio_stream).await;
     }
 
