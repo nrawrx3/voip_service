@@ -532,6 +532,7 @@ async fn handle_room_events(
                     }
 
                     // Create a new stop signal for the audio thread.
+                    // TODO: Simply remove the audio stream from the frame combiner. We don't need to use channels for it.
                     let (stop_audio_thread_tx, stop_audio_thread_rx) =
                         tokio::sync::oneshot::channel();
 
@@ -541,9 +542,11 @@ async fn handle_room_events(
                         .insert(remote_user_name.clone(), stop_audio_thread_tx);
 
                     if !service_guard.config.disable_remote_audio_playback {
-                        tokio::spawn(async move {
-                            play_audio_stream(track, stop_audio_thread_rx).await
-                        });
+                        let service = service.clone();
+                        // play_audio_stream(track, stop_audio_thread_rx).await
+                        handle_audio_frame(service, track)
+                            .await
+                            .expect("Failed to handle audio frame");
                     } else {
                         info!("Remote audio playback DISABLED");
                     }
@@ -664,6 +667,7 @@ fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<Fr
 }
 
 // TODO: Take a command channel in order to exit the audio playback loop.
+// TODO: Remove this. Not using it anymore.
 async fn play_audio_stream(
     audio_track: RemoteAudioTrack,
     stop_audio_thread_rx: tokio::sync::oneshot::Receiver<bool>,
@@ -792,6 +796,26 @@ async fn play_audio_stream(
             }
         }
     });
+
+    Ok(())
+}
+
+async fn handle_audio_frame(
+    voip_service: SharedVoipService,
+    audio_track: RemoteAudioTrack,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut audio_stream = NativeAudioStream::new(
+        audio_track.rtc_track(),
+        SAMPLE_RATE as i32,
+        NUM_CHANNELS as i32,
+    );
+
+    // Add it to the frame combiner
+    let guard = voip_service.lock().await;
+
+    if let Some(frame_combiner) = &guard.frame_combiner {
+        frame_combiner.add_audio_stream(audio_stream).await;
+    }
 
     Ok(())
 }
@@ -965,8 +989,11 @@ impl SharedFrameCombiner {
     }
 
     async fn add_audio_stream(&self, audio_stream: NativeAudioStream) {
+        info!("Adding audio stream to frame combiner");
         let mut fc_mutex_guard = self.0.lock().expect("Failed to lock frame combiner");
         fc_mutex_guard.audio_streams.push(audio_stream);
+
+        info!("Done adding audio stream to frame combiner");
     }
 
     async fn keep_polling(&self, frame_sender: tokio::sync::mpsc::Sender<FrameArray>) {
@@ -978,12 +1005,12 @@ impl SharedFrameCombiner {
         loop {
             interval.as_mut().tick().await;
 
-            info!("Polling for audio frames");
+            // info!("Polling for audio frames");
 
             // Lock the state to access the audio streams
             let mut self_guard = self.0.lock().expect("Failed to lock frame combiner");
 
-            info!("Acquired lock for audio streams");
+            // info!("Acquired lock for audio streams");
 
             // Allocate a new mix buffer for mixing audio frames
             let mut mix_buffer = FrameArray::new();
