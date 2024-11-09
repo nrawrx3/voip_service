@@ -16,7 +16,7 @@ use reqwest::{Client, StatusCode};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{atomic, Arc};
 use std::time::Duration;
 use std::vec;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -943,6 +943,8 @@ struct FrameCombiner {
 
 struct SharedFrameCombiner(Arc<std::sync::Mutex<FrameCombiner>>);
 
+pub static should_stop_frame_poller: atomic::AtomicBool = atomic::AtomicBool::new(false);
+
 impl SharedFrameCombiner {
     fn new() -> Self {
         let fc = FrameCombiner {
@@ -968,6 +970,11 @@ impl SharedFrameCombiner {
 
         loop {
             interval.as_mut().tick().await;
+
+            if should_stop_frame_poller.load(atomic::Ordering::Relaxed) {
+                info!("Stopping audio frame polling loop");
+                break;
+            }
 
             // info!("Polling for audio frames");
 

@@ -1,11 +1,12 @@
 use log::info;
 use ringbuf::rb::local;
-use std::sync::Arc;
+use std::{process::exit, sync::Arc};
 use tokio::{runtime::Runtime, sync::Mutex, task::LocalSet};
 use tonic::transport::Server;
 
 use crate::voip_service::{
-    pb::voip_service_server::VoipServiceServer, start_audio_playback, MyVoipService,
+    pb::voip_service_server::VoipServiceServer, should_stop_frame_poller, start_audio_playback,
+    MyVoipService,
 };
 
 pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,15 +43,14 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Drop all client event senders, which will close their streams.
                     voip_service.lock().await.event_sender_of_client.clear();
+
+                    should_stop_frame_poller.store(true, std::sync::atomic::Ordering::Release);
                 })
                 .await
                 .expect("Error shutting down grpc server");
         });
 
-        // Not joining on the frame poller local. A bit hard to do and not
-        // really needed. We will simply exit the process when the grpc server
-        // exits.
-        let result = tokio::join!(grpc_server_future);
+        let result = tokio::join!(grpc_server_future, local_set);
         // result.1.expect("Error closing tasks");
 
         info!("Audio playback task finished.");
