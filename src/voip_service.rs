@@ -304,6 +304,7 @@ pub async fn connect_to_livekit(
             if service_guard.config.disable_local_audio_capture {
                 info!("Local audio capture DISABLED, not starting audio capture");
             } else {
+                info!("Starting audio capture");
                 tokio::spawn(start_capturing_audio_input(service.clone()));
                 info!("Done starting audio capture");
             }
@@ -714,140 +715,6 @@ fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<Fr
     });
 }
 
-// TODO: Take a command channel in order to exit the audio playback loop.
-// TODO: Remove this. Not using it anymore.
-async fn play_audio_stream(
-    audio_track: RemoteAudioTrack,
-    stop_audio_thread_rx: tokio::sync::oneshot::Receiver<bool>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("Start audio stream at time {:?}", std::time::Instant::now());
-
-    // Get the default audio output device
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .expect("Failed to find default output device");
-
-    // Set up the output format
-    let config = device.default_output_config()?.into();
-
-    let sample_rate = SAMPLE_RATE;
-    // let bit_depth = 16;
-    let num_channels = 2;
-
-    // Set up the resampler
-    let mut resampler = AudioResampler::default();
-    let rtc_track = audio_track.rtc_track();
-    let mut audio_stream =
-        NativeAudioStream::new(rtc_track, sample_rate as i32, num_channels as i32);
-
-    // Build a channel to send audio samples
-    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<f32>>(10);
-
-    // Start a separate thread to handle the audio playback using cpal
-    std::thread::spawn(move || {
-        let stream = device
-            .build_output_stream(
-                &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    loop {
-                        if let Ok(samples) = receiver.try_recv() {
-                            // info!("Received {} samples from cpal thread", samples.len());
-
-                            for (i, sample) in samples.iter().enumerate() {
-                                if i < data.len() {
-                                    data[i] = *sample;
-                                }
-                            }
-                        } else {
-                            // If no new samples, fill with silence.
-                            // info!("No new samples, filling with silence");
-                            // for sample in data.iter_mut() {
-                            //     *sample = 0.0;
-                            // }
-                            break;
-                        }
-                    }
-                },
-                move |err| {
-                    eprintln!("Error occurred on stream: {}", err);
-                },
-                None, // No timeout needed here
-            )
-            .unwrap();
-
-        // Start the stream in the separate thread
-        if let Err(err) = stream.play() {
-            error!(
-                "Failed to play audio stream on device: {}, error: {}",
-                device.name().unwrap(),
-                err
-            );
-        } else {
-            info!("Playing audio stream on device: {}", device.name().unwrap());
-        }
-
-        // Keep the thread alive for the duration of the stream
-        std::thread::park(); // Thread will sleep here until manually woken
-    });
-
-    // Receive new samples from the audio track.
-    tokio::spawn(async move {
-        let start_time = std::time::Instant::now();
-        let mut last_dt = std::time::Instant::now();
-
-        let mut printed_audio_frame_info = false;
-
-        loop {
-            match audio_stream.next().await {
-                Some(frame) => {
-                    if !printed_audio_frame_info {
-                        let new_dt = std::time::Instant::now();
-                        let dt = new_dt - last_dt;
-                        last_dt = new_dt;
-
-                        log::info!(
-                            "Receiving audio frame with {} samples - {:?}",
-                            frame.data.len(),
-                            dt.as_nanos()
-                        );
-
-                        printed_audio_frame_info = true;
-                    }
-
-                    // Wait for the consumed samples buffer to have space
-                    // let data_f32 = consumed_samples_buffer_rx.recv().await.unwrap();
-
-                    // Resample the audio frame
-                    let data_i16 = resampler.remix_and_resample(
-                        &frame.data,
-                        frame.samples_per_channel,
-                        frame.num_channels,
-                        frame.sample_rate,
-                        num_channels,
-                        sample_rate,
-                    );
-
-                    // Convert i16 samples to f32 before sending to cpal
-                    let data_f32: Vec<f32> = data_i16
-                        .iter()
-                        .map(|&sample| sample as f32 / i16::MAX as f32) // Normalize i16 to f32
-                        .collect();
-
-                    let _ = sender.send(data_f32).await; // Send the f32 samples to the cpal callback
-                                                         // fresh_samples_buffer_tx.send(data_f32).await.unwrap();
-                }
-                None => {
-                    info!("No more audio frames to play, closing cpal stream");
-                    break;
-                }
-            }
-        }
-    });
-
-    Ok(())
-}
-
 async fn handle_audio_frame(
     voip_service: &mut MyVoipService,
     audio_track: RemoteAudioTrack,
@@ -912,6 +779,8 @@ async fn start_capturing_audio_input(
     let device = host
         .default_input_device()
         .expect("Failed to get default input device");
+
+    info!("Choosing input device: {}", device.name()?);
 
     // Loop through each supported config and find the one that exactly matches
     // our hardcoded values.
