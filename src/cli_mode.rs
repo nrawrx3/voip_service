@@ -47,8 +47,10 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Error shutting down grpc server");
         });
 
-        // // Join all
-        let result = tokio::join!(local_set, grpc_server_future);
+        // Not joining on the frame poller local. A bit hard to do and not
+        // really needed. We will simply exit the process when the grpc server
+        // exits.
+        let result = tokio::join!(grpc_server_future);
         // result.1.expect("Error closing tasks");
 
         info!("Audio playback task finished.");
