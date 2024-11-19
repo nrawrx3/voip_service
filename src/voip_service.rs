@@ -23,6 +23,8 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tonic::{Request, Response, Status};
 
+use crate::debug_stats::{AudioPacketConfig, SharedDebugStats};
+
 const SAMPLE_RATE: usize = 48000;
 const SAMPLES_PER_10_MS: usize = SAMPLE_RATE / 100; // 480 samples per 10ms
 const NUM_OUTPUT_CHANNELS: usize = 2;
@@ -318,7 +320,10 @@ pub async fn connect_to_livekit(
     }
 }
 
-pub async fn start_audio_playback(service: SharedVoipService) -> JoinHandle<()> {
+pub async fn start_audio_playback(
+    service: SharedVoipService,
+    debug_stats: SharedDebugStats,
+) -> JoinHandle<()> {
     let frame_combiner = SharedFrameCombiner::new();
 
     let mut audio_frame_sender = None;
@@ -340,7 +345,7 @@ pub async fn start_audio_playback(service: SharedVoipService) -> JoinHandle<()> 
     tokio::task::spawn_local(async move {
         info!("Starting frame combiner polling task in local set");
         frame_combiner
-            .keep_polling(audio_frame_sender.unwrap())
+            .keep_polling(audio_frame_sender.unwrap(), debug_stats)
             .await
     })
 }
@@ -883,7 +888,11 @@ impl SharedFrameCombiner {
         info!("Done adding audio stream to frame combiner");
     }
 
-    async fn keep_polling(&self, frame_sender: tokio::sync::mpsc::Sender<FrameArray>) {
+    async fn keep_polling(
+        &self,
+        frame_sender: tokio::sync::mpsc::Sender<FrameArray>,
+        debug_stats: SharedDebugStats,
+    ) {
         let interval = tokio::time::interval(AUDIO_FRAME_POLL_INTERVAL);
         tokio::pin!(interval);
 
@@ -931,6 +940,17 @@ impl SharedFrameCombiner {
                     for (i, sample) in frame.data.iter().enumerate() {
                         mix_buffer.data[i] += (*sample as f32) / i16::MAX as f32;
                     }
+
+                    // Add to debug stats.
+                    debug_stats
+                        .lock()
+                        .unwrap()
+                        .add_unique_audio_packet_config(AudioPacketConfig {
+                            sample_rate: frame.sample_rate as usize,
+                            buffer_size_in_samples: frame.data.len() / frame.num_channels as usize,
+
+                            channels: frame.num_channels as usize,
+                        });
                 } else {
                     // Handle the case where the stream has ended or timed out
                     warn!("Audio stream ended or timed out");

@@ -4,9 +4,12 @@ use std::{process::exit, sync::Arc};
 use tokio::{runtime::Runtime, sync::Mutex, task::LocalSet};
 use tonic::transport::Server;
 
-use crate::voip_service::{
-    pb::voip_service_server::VoipServiceServer, should_stop_frame_poller, start_audio_playback,
-    MyVoipService,
+use crate::{
+    debug_stats::SharedDebugStats,
+    voip_service::{
+        pb::voip_service_server::VoipServiceServer, should_stop_frame_poller, start_audio_playback,
+        MyVoipService,
+    },
 };
 
 pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,13 +27,21 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .expect("Error setting Ctrl-C handler");
 
+    let debug_stats =
+        SharedDebugStats::new(std::sync::Mutex::new(crate::debug_stats::DebugStats {
+            unique_audio_packet_configs: std::collections::HashSet::new(),
+        }));
+
+    let debug_stats_clone = debug_stats.clone();
+
     rt.block_on(async {
         let voip_service = Arc::new(Mutex::new(MyVoipService::default()));
 
         let vs_clone = voip_service.clone();
 
         let local_set = LocalSet::new();
-        local_set.spawn_local(async move { start_audio_playback(vs_clone).await });
+        local_set
+            .spawn_local(async move { start_audio_playback(vs_clone, debug_stats_clone).await });
 
         let addr = "[::1]:50051".parse().unwrap();
         info!("Starting grpc server at {}", addr);
@@ -45,6 +56,9 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
                     voip_service.lock().await.event_sender_of_client.clear();
 
                     should_stop_frame_poller.store(true, std::sync::atomic::Ordering::Release);
+
+                    // Print the debug stats.
+                    debug_stats.lock().unwrap().print();
                 })
                 .await
                 .expect("Error shutting down grpc server");

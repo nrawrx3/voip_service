@@ -2,12 +2,12 @@ use log::info;
 
 mod cli_mode;
 mod config;
+mod debug_stats;
 mod device_config;
 mod logging;
 mod model;
 mod perf_samples;
 mod voip_service;
-mod wav;
 
 #[cfg(feature = "windows-background-service")]
 mod windows_service_mode;
