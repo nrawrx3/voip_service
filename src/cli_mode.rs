@@ -1,6 +1,5 @@
 use log::info;
-use ringbuf::rb::local;
-use std::{process::exit, sync::Arc};
+use std::sync::Arc;
 use tokio::{runtime::Runtime, sync::Mutex, task::LocalSet};
 use tonic::transport::Server;
 

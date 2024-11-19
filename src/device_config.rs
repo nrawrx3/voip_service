@@ -1,7 +1,4 @@
-use cpal::{
-    SampleRate, SupportedInputConfigs, SupportedOutputConfigs, SupportedStreamConfig,
-    SupportedStreamConfigRange,
-};
+use cpal::{SampleRate, SupportedStreamConfigRange};
 use log::info;
 
 pub fn find_suitable_stream_config(
@@ -15,7 +12,7 @@ pub fn find_suitable_stream_config(
     let buffer_size_in_bytes = buffer_size_in_samples * channels * size_of::<f32>();
 
     for config in stream_configs {
-        info!("Supported output config: {:?}", config);
+        info!("Have supported config: {:?}", config);
 
         if must_have_config.is_some() {
             continue;

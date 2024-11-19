@@ -1,6 +1,5 @@
-use std::{collections::HashSet, fmt::Debug};
+use std::collections::HashSet;
 
-use futures::future::Shared;
 use serde::Serialize;
 
 #[derive(Serialize)]

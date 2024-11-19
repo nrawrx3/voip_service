@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use futures::future::{join_all, poll_fn};
+use futures::future::poll_fn;
 use futures::{Stream, StreamExt};
-use livekit::options::{audio, TrackPublishOptions};
+use livekit::options::TrackPublishOptions;
 use livekit::participant::ParticipantKind;
 use livekit::prelude::LocalParticipant;
 use livekit::track::{LocalAudioTrack, LocalTrack, RemoteAudioTrack, RemoteTrack, TrackSource};
@@ -17,16 +17,16 @@ use std::pin::Pin;
 use std::sync::{atomic, Arc};
 use std::time::Duration;
 use std::vec;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::debug_stats::{AudioPacketConfig, SharedDebugStats};
 
 const SAMPLE_RATE: usize = 48000;
-const SAMPLES_PER_10_MS: usize = SAMPLE_RATE / 100; // 480 samples per 10ms
+const SAMPLES_PER_10_MS: usize = (SAMPLE_RATE / 1000) * 10; // 480 samples per 10ms
 const NUM_OUTPUT_CHANNELS: usize = 2;
 const NUM_INPUT_CHANNELS: usize = 1;
 
@@ -332,7 +332,7 @@ pub async fn start_audio_playback(
         let mut guard = service.lock().await;
 
         let frame_receiver = guard.audio_frame_receiver.take().unwrap();
-        spawn_cpal_playback_thread(frame_receiver);
+        start_cpal_playback_thread(frame_receiver);
 
         audio_frame_sender = Some(guard.audio_frame_sender.clone());
 
@@ -596,20 +596,17 @@ async fn send_event_to_clients(
     }
 }
 
-fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<FrameArray>) {
+fn start_cpal_playback_thread(frame_receiver: tokio::sync::mpsc::Receiver<FrameArray>) {
     // Get the default audio output device
     let host = cpal::default_host();
     let device = host
         .default_output_device()
         .expect("Failed to find default output device");
 
-    // Seems like the buffer size is provided as bytes in SupportedStreamConfig while in StreamConfig it should be provided as samples.
-    let wanted_buffer_size = (SAMPLES_PER_10_MS * NUM_OUTPUT_CHANNELS) * 4; // 4 bytes per f32 sample
-
     // Print all output configs supported. Choose one with our SAMPLE_RATE and NUM_CHANNELS=2 and buffer size of 10ms = 480 samples => 480 * 2 = 960 f32 scalars.
     let mut supported_configs = device.supported_output_configs().unwrap();
 
-    let mut config = find_suitable_stream_config(
+    let config = find_suitable_stream_config(
         &mut supported_configs as &mut dyn Iterator<Item = _>,
         SAMPLE_RATE,
         NUM_OUTPUT_CHANNELS,
@@ -622,12 +619,18 @@ fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<Fr
     // Start a separate thread to handle the audio playback using cpal
     std::thread::spawn(move || {
         let mut frame_receiver = frame_receiver;
+
+        let mut already_printed_data_length = false;
+
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| loop {
                     if let Ok(frame_array) = frame_receiver.try_recv() {
-                        // info!("cpal device buffer length = {}", data.len());
+                        if !already_printed_data_length {
+                            info!("cpal device buffer length = {}", data.len());
+                            already_printed_data_length = true;
+                        }
 
                         for (i, sample) in frame_array.data.iter().enumerate() {
                             if i < data.len() {
@@ -739,7 +742,7 @@ async fn start_capturing_audio_input(
     .expect("Failed to find suitable input config");
 
     // Create a channel for sending frames from the device callback to an async task.
-    let (tx, mut rx) = mpsc::channel::<AudioFrame>(10);
+    let (tx, mut rx) = mpsc::channel::<AudioFrame>(100);
 
     // Lock the service to access the room and publish the track
     let native_audio_source = {
@@ -749,7 +752,7 @@ async fn start_capturing_audio_input(
             let native_audio_source = publish_local_track(
                 room.local_participant(),
                 SAMPLE_RATE as u32,
-                NUM_OUTPUT_CHANNELS as u32,
+                NUM_INPUT_CHANNELS as u32,
             )
             .await?;
 
@@ -778,9 +781,9 @@ async fn start_capturing_audio_input(
                     // Create an audio frame for NativeAudioSource
                     let audio_frame = AudioFrame {
                         data: pcm_samples.into(),
-                        num_channels: NUM_OUTPUT_CHANNELS as u32,
+                        num_channels: NUM_INPUT_CHANNELS as u32,
                         sample_rate: SAMPLE_RATE as u32,
-                        samples_per_channel: (frame_size / NUM_OUTPUT_CHANNELS as usize) as u32,
+                        samples_per_channel: (frame_size / NUM_INPUT_CHANNELS as usize) as u32,
                     };
 
                     // Send the audio frame to the async task via the channel
