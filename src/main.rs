@@ -2,6 +2,7 @@ use log::info;
 
 mod cli_mode;
 mod config;
+mod device_config;
 mod logging;
 mod model;
 mod perf_samples;

@@ -1,5 +1,4 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleRate, SupportedOutputConfigs};
 use futures::future::{join_all, poll_fn};
 use futures::{Stream, StreamExt};
 use livekit::options::{audio, TrackPublishOptions};
@@ -8,7 +7,6 @@ use livekit::prelude::LocalParticipant;
 use livekit::track::{LocalAudioTrack, LocalTrack, RemoteAudioTrack, RemoteTrack, TrackSource};
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::webrtc::native::audio_resampler::AudioResampler;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions, RtcAudioSource};
 use livekit::{Room, RoomEvent, RoomOptions};
 use log::{error, info, warn};
@@ -25,10 +23,10 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{ReceiverStream, UnboundedReceiverStream};
 use tonic::{Request, Response, Status};
 
-const SAMPLE_RATE: u32 = 48000;
-const SAMPLES_PER_10_MS: u32 = SAMPLE_RATE / 100; // 480 samples per 10ms
-const SAMPLES_PER_100_MS: u32 = SAMPLES_PER_10_MS * 10; // 4800 samples per 100ms
-const NUM_CHANNELS: u32 = 2;
+const SAMPLE_RATE: usize = 48000;
+const SAMPLES_PER_10_MS: usize = SAMPLE_RATE / 100; // 480 samples per 10ms
+const NUM_OUTPUT_CHANNELS: usize = 2;
+const NUM_INPUT_CHANNELS: usize = 1;
 
 pub mod pb {
     // tonic::include!("/pb/voip.rs"); // Generated from the proto file
@@ -40,6 +38,7 @@ use pb::voip_service_server::VoipService;
 use pb::{ClientAppConnected, ClientInfo, SendDebugEventPayload, VoipServerEvent};
 
 use crate::config::Config;
+use crate::device_config::find_suitable_stream_config;
 use crate::model;
 
 // Type alias for the streaming server response.
@@ -347,28 +346,6 @@ pub async fn start_audio_playback(service: SharedVoipService) -> JoinHandle<()> 
 }
 
 impl MyVoipService {
-    // pub async fn start_audio_playback(&mut self) {
-    //     // Start the audio playback thread.
-    //     let frame_receiver = self.audio_frame_receiver.take().unwrap();
-    //     spawn_cpal_playback_thread(frame_receiver);
-
-    //     info!("Started cpal playback thread");
-
-    //     let frame_combiner = SharedFrameCombiner::new();
-
-    //     self.frame_combiner = Some(SharedFrameCombiner(frame_combiner.0.clone()));
-
-    //     let audio_frame_sender = self.audio_frame_sender.clone();
-
-    //     // Start the frame combiner task.
-    //     let result = tokio::task::spawn_local(async move {
-    //         info!("Starting frame combiner polling task in local set");
-    //         frame_combiner.keep_polling(audio_frame_sender).await
-    //     })
-    //     .await;
-    //     // info!("Started frame combiner polling task");
-    // }
-
     // Method to print room info (list of participants)
     pub async fn current_room_info(&self) -> Result<model::RoomInfo, &'static str> {
         if self.current_room.is_none() {
@@ -621,55 +598,19 @@ fn spawn_cpal_playback_thread(mut frame_receiver: tokio::sync::mpsc::Receiver<Fr
         .default_output_device()
         .expect("Failed to find default output device");
 
-    let mut must_have_config = None;
-
     // Seems like the buffer size is provided as bytes in SupportedStreamConfig while in StreamConfig it should be provided as samples.
-    let wanted_buffer_size = (SAMPLES_PER_10_MS * NUM_CHANNELS) * 4; // 4 bytes per f32 sample
+    let wanted_buffer_size = (SAMPLES_PER_10_MS * NUM_OUTPUT_CHANNELS) * 4; // 4 bytes per f32 sample
 
     // Print all output configs supported. Choose one with our SAMPLE_RATE and NUM_CHANNELS=2 and buffer size of 10ms = 480 samples => 480 * 2 = 960 f32 scalars.
-    let output_configs = device.supported_output_configs().unwrap();
-    for config in output_configs {
-        info!("Supported output config: {:?}", config);
+    let mut supported_configs = device.supported_output_configs().unwrap();
 
-        if must_have_config.is_some() {
-            continue;
-        }
-
-        let sr_min = config.min_sample_rate();
-        let sr_max = config.max_sample_rate();
-
-        let sr_buffer_size = match config.buffer_size().clone() {
-            cpal::SupportedBufferSize::Range { min, max } => {
-                if min <= wanted_buffer_size && wanted_buffer_size <= max {
-                    Some(wanted_buffer_size)
-                } else {
-                    None
-                }
-            }
-
-            cpal::SupportedBufferSize::Unknown => None,
-        };
-
-        // Usually we will have 48k sample rate and 2 channels. Hardcoding it for that.
-        if sr_min == SampleRate(SAMPLE_RATE)
-            && sr_max == SampleRate(SAMPLE_RATE)
-            && sr_buffer_size.is_some()
-        {
-            must_have_config = Some(cpal::StreamConfig {
-                channels: NUM_CHANNELS as u16,
-                sample_rate: SampleRate(SAMPLE_RATE),
-                buffer_size: cpal::BufferSize::Fixed(SAMPLES_PER_10_MS),
-            });
-        }
-    }
-
-    // Set up the output format
-    // let mut config: cpal::StreamConfig = device
-    //     .default_output_config()
-    //     .expect("Failed to get default device output config")
-    //     .into();
-
-    let mut config = must_have_config.expect("Failed to find suitable output config");
+    let mut config = find_suitable_stream_config(
+        &mut supported_configs as &mut dyn Iterator<Item = _>,
+        SAMPLE_RATE,
+        NUM_OUTPUT_CHANNELS,
+        SAMPLES_PER_10_MS,
+    )
+    .expect("Failed to find suitable output config");
 
     info!("Using output config: {:?}", config);
 
@@ -728,7 +669,7 @@ async fn handle_audio_frame(
     let audio_stream = NativeAudioStream::new(
         audio_track.rtc_track(),
         SAMPLE_RATE as i32,
-        NUM_CHANNELS as i32,
+        NUM_OUTPUT_CHANNELS as i32,
     );
 
     if let Some(frame_combiner) = &voip_service.frame_combiner {
@@ -782,55 +723,17 @@ async fn start_capturing_audio_input(
 
     info!("Choosing input device: {}", device.name()?);
 
-    // Loop through each supported config and find the one that exactly matches
-    // our hardcoded values.
+    let mut supported_input_configs = device.supported_input_configs()?;
 
-    let supported_input_configs = device.supported_input_configs()?;
+    let config = find_suitable_stream_config(
+        &mut supported_input_configs as &mut dyn Iterator<Item = _>,
+        SAMPLE_RATE,
+        NUM_INPUT_CHANNELS,
+        SAMPLES_PER_10_MS,
+    )
+    .expect("Failed to find suitable input config");
 
-    let mut must_have_config = None;
-
-    let wanted_buffer_size = (SAMPLES_PER_10_MS * NUM_CHANNELS) * 4; // 4 bytes per f32 sample
-
-    for config in supported_input_configs {
-        info!("Supported input config: {:?}", config);
-
-        if must_have_config.is_some() {
-            continue;
-        }
-
-        let sr_min = config.min_sample_rate();
-        let sr_max = config.max_sample_rate();
-
-        let sr_buffer_size = match config.buffer_size().clone() {
-            cpal::SupportedBufferSize::Range { min, max } => {
-                if min <= wanted_buffer_size && wanted_buffer_size <= max {
-                    Some(SAMPLES_PER_10_MS)
-                } else {
-                    None
-                }
-            }
-
-            cpal::SupportedBufferSize::Unknown => None,
-        };
-
-        // Usually we will have 48k sample rate and 2 channels. Hardcoding it for that.
-        if sr_min == SampleRate(SAMPLE_RATE)
-            && sr_max == SampleRate(SAMPLE_RATE)
-            && sr_buffer_size.is_some()
-        {
-            must_have_config = Some(cpal::StreamConfig {
-                channels: NUM_CHANNELS as u16,
-                sample_rate: SampleRate(SAMPLE_RATE),
-                buffer_size: cpal::BufferSize::Fixed(SAMPLES_PER_10_MS),
-            });
-        }
-    }
-
-    // let mut config: cpal::StreamConfig = device.default_input_config()?.into();
-
-    let config = must_have_config.expect("Failed to find suitable input config");
-
-    // Create a channel for sending frames from the callback to an async task
+    // Create a channel for sending frames from the device callback to an async task.
     let (tx, mut rx) = mpsc::channel::<AudioFrame>(10);
 
     // Lock the service to access the room and publish the track
@@ -838,8 +741,12 @@ async fn start_capturing_audio_input(
         let service_guard = voip_service.lock().await;
 
         if let Some(room) = &service_guard.current_room {
-            let native_audio_source =
-                publish_local_track(room.local_participant(), SAMPLE_RATE, NUM_CHANNELS).await?;
+            let native_audio_source = publish_local_track(
+                room.local_participant(),
+                SAMPLE_RATE as u32,
+                NUM_OUTPUT_CHANNELS as u32,
+            )
+            .await?;
 
             native_audio_source
         } else {
@@ -866,9 +773,9 @@ async fn start_capturing_audio_input(
                     // Create an audio frame for NativeAudioSource
                     let audio_frame = AudioFrame {
                         data: pcm_samples.into(),
-                        num_channels: NUM_CHANNELS,
-                        sample_rate: SAMPLE_RATE,
-                        samples_per_channel: (frame_size / NUM_CHANNELS as usize) as u32,
+                        num_channels: NUM_OUTPUT_CHANNELS as u32,
+                        sample_rate: SAMPLE_RATE as u32,
+                        samples_per_channel: (frame_size / NUM_OUTPUT_CHANNELS as usize) as u32,
                     };
 
                     // Send the audio frame to the async task via the channel
@@ -895,8 +802,22 @@ async fn start_capturing_audio_input(
         while let Some(audio_frame) = rx.recv().await {
             // Capture the frame asynchronously using NativeAudioSource
             // info!("Input frame count: {}", audio_frame.data.len());
-            if let Err(e) = native_audio_source.capture_frame(&audio_frame).await {
-                eprintln!("Failed to capture frame: {}", e);
+            tokio::select! {
+                res = native_audio_source.capture_frame(&audio_frame) => {
+                    match res {
+                        Ok(_) => {
+                            // info!("Captured frame successfully");
+                        }
+
+                        Err(e) => {
+                            error!("Failed to capture frame: {}", e);
+                        }
+                    }
+                }
+
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    info!("Timeout while capturing local audio frame");
+                }
             }
         }
     });
@@ -908,13 +829,13 @@ const AUDIO_FRAME_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
 struct FrameArray {
-    data: [f32; (SAMPLES_PER_10_MS * NUM_CHANNELS) as usize],
+    data: [f32; (SAMPLES_PER_10_MS * NUM_OUTPUT_CHANNELS) as usize],
 }
 
 impl FrameArray {
     fn new() -> Self {
         FrameArray {
-            data: [0.0; (SAMPLES_PER_10_MS * NUM_CHANNELS) as usize],
+            data: [0.0; (SAMPLES_PER_10_MS * NUM_OUTPUT_CHANNELS) as usize],
         }
     }
 }
@@ -922,7 +843,7 @@ impl FrameArray {
 impl Default for FrameArray {
     fn default() -> Self {
         FrameArray {
-            data: [0.0; (SAMPLES_PER_10_MS * NUM_CHANNELS) as usize],
+            data: [0.0; (SAMPLES_PER_10_MS * NUM_OUTPUT_CHANNELS) as usize],
         }
     }
 }
