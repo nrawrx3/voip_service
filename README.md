@@ -19,6 +19,8 @@ export RUSTFLAGS="-C link-args=-ObjC"
 
 ### For Windows
 
+Make sure to use powershell plz.
+
 ```
 $env:RUSTFLAGS="-C target-feature=+crt-static --cfg tokio_unstable"
 ```
@@ -33,6 +35,10 @@ cargo run
 ```
 
 ### Running as a windows service
+
+- Use the `.\setup.ps1` script.
+ 
+It uses `sc.exe` for creating, starting and stopping the service as follows:
 
 - Build and ensure the debug exe is at `.\target\debug\voip_service.exe`
 - Run `sc.exe create voipservice binPath= "<project-dir>\target\debug\voip_service.exe"` (Replace <project-dir> with path to checked out repo)
