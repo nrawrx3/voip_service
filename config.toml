@@ -1,8 +1,8 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static", "--cfg", "tokio_unstable"]
 
-[target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static", "--cfg", "tokio_unstable"]
+# [target.aarch64-pc-windows-msvc]
+# rustflags = ["-C", "target-feature=+crt-static", "--cfg", "tokio_unstable"]
 
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-args=-ObjC", "--cfg", "tokio_unstable"]

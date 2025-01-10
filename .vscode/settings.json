@@ -3,5 +3,8 @@
   "rust-analyzer.check.extraArgs": [
     "--target-dir",
     "/tmp/rust-analyzer-check"
-  ]
+  ],
+  "rust-analyzer.cargo.features": [
+    "windows-background-service"
+  ],
 }

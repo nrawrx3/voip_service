@@ -11,6 +11,7 @@ use crate::{
     },
 };
 
+#[cfg(feature = "cli-mode")]
 pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     console_subscriber::init();

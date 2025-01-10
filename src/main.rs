@@ -6,7 +6,6 @@ mod debug_stats;
 mod device_config;
 mod logging;
 mod model;
-mod perf_samples;
 mod voip_service;
 
 #[cfg(feature = "windows-background-service")]
@@ -19,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         windows_service_mode::entry_main()?;
     }
 
-    #[cfg(not(feature = "windows-background-service"))]
+    #[cfg(feature = "cli-mode")]
     {
         info!("Starting in CLI mode.");
         cli_mode::entry_main()?;

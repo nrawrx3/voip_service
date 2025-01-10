@@ -1,19 +1,19 @@
-use logging::setup_logging;
+use crate::logging::setup_logging;
+use crate::voip_service::MyVoipService;
 use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use voip_service::MyVoipService;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
 
+use crate::voip_service::pb::voip_service_server::VoipServiceServer;
 use log::info;
 use tokio::sync::{oneshot, Mutex};
 use tonic::transport::Server;
-use voip_service::pb::voip_service_server::VoipServiceServer;
 
 // Service entry point
 define_windows_service!(ffi_service_main, windows_service_main);

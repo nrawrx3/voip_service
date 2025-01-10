@@ -17,6 +17,12 @@ extra arg needs to be passed as env variable.
 export RUSTFLAGS="-C link-args=-ObjC"
 ```
 
+### For Windows
+
+```
+$env:RUSTFLAGS="-C target-feature=+crt-static --cfg tokio_unstable"
+```
+
 ### Run the service (deprecated: See next section)
 Then
 
