@@ -12,16 +12,16 @@ mod voip_service;
 mod windows_service_mode;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(feature = "windows-background-service")]
-    {
+    if cfg!(feature = "windows-background-service") {
         info!("Starting in Windows service mode.");
+        #[cfg(feature = "windows-background-service")]
         windows_service_mode::entry_main()?;
-    }
-
-    #[cfg(feature = "cli-mode")]
-    {
+    } else if cfg!(feature = "cli-mode") {
         info!("Starting in CLI mode.");
+        #[cfg(feature = "cli-mode")]
         cli_mode::entry_main()?;
+    } else {
+        info!("No valid mode selected. Please enable either 'windows-background-service' or 'cli-mode' feature.");
     }
 
     Ok(())

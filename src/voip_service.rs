@@ -241,6 +241,10 @@ pub async fn connect_to_livekit(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut service_guard = service.lock().await;
 
+    if client_id.is_empty() {
+        info!("Client id is empty");
+    }
+
     info!(
         "Fetching join token for self {} in room {}",
         user_name, room_name
@@ -326,7 +330,7 @@ pub async fn start_audio_playback(
 ) -> JoinHandle<()> {
     let frame_combiner = SharedFrameCombiner::new();
 
-    let mut audio_frame_sender = None;
+    let audio_frame_sender;
 
     {
         let mut guard = service.lock().await;
@@ -340,6 +344,10 @@ pub async fn start_audio_playback(
 
         info!("Started cpal playback thread");
     }
+
+    // if audio_frame_sender.is_none(){
+    //     info!("Audio is none");
+    // }
 
     // Start the frame combiner task.
     tokio::task::spawn_local(async move {
@@ -524,7 +532,7 @@ async fn handle_room_events(
 
                     // Create a new stop signal for the audio thread.
                     // TODO: Simply remove the audio stream from the frame combiner. We don't need to use channels for it.
-                    let (stop_audio_thread_tx, stop_audio_thread_rx) =
+                    let (stop_audio_thread_tx, _stop_audio_thread_rx) =
                         tokio::sync::oneshot::channel();
 
                     // Store the new stop signal in the service.
@@ -546,9 +554,9 @@ async fn handle_room_events(
             }
 
             RoomEvent::TrackUnsubscribed {
-                track,
-                publication,
-                participant,
+                track: _,
+                publication: _,
+                participant: _,
             } => {}
 
             RoomEvent::LocalTrackSubscribed { track } => {
@@ -872,7 +880,7 @@ struct FrameCombiner {
 
 struct SharedFrameCombiner(Arc<std::sync::Mutex<FrameCombiner>>);
 
-pub static should_stop_frame_poller: atomic::AtomicBool = atomic::AtomicBool::new(false);
+pub static SHOULD_STOP_FRAME_POLLER: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 impl SharedFrameCombiner {
     fn new() -> Self {
@@ -904,7 +912,7 @@ impl SharedFrameCombiner {
         loop {
             interval.as_mut().tick().await;
 
-            if should_stop_frame_poller.load(atomic::Ordering::Relaxed) {
+            if SHOULD_STOP_FRAME_POLLER.load(atomic::Ordering::Relaxed) {
                 info!("Stopping audio frame polling loop");
                 break;
             }

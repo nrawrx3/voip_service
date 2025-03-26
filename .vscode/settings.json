@@ -5,6 +5,7 @@
     "/tmp/rust-analyzer-check"
   ],
   "rust-analyzer.cargo.features": [
-    "windows-background-service"
+    "windows-background-service",
+    "cli-mode"
   ],
 }
