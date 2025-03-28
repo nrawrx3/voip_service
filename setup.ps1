@@ -8,7 +8,7 @@ function Build-Service {
         Write-Host "Building the service..."
         cd $ProjectDir
         $env:RUSTFLAGS = "-C target-feature=+crt-static --cfg tokio_unstable"
-        cargo build --features windows-service
+        cargo build --features windows-background-service
         if (-Not (Test-Path "$ProjectDir\target\debug\voip_service.exe")) {
                 Write-Error "Build failed. Ensure 'cargo' is installed and properly configured."
                 exit 1
