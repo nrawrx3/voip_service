@@ -33,3 +33,6 @@ tonic-build = "0.12.3"
 [features]
 windows-background-service = ["windows-service"]
 cli-mode = ["console-subscriber"]
+
+[profile.release]
+debug = true

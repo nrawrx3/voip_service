@@ -1,5 +1,3 @@
-
-
 #[cfg(feature = "cli-mode")]
 pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
@@ -8,7 +6,13 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
     use tokio::{runtime::Runtime, sync::Mutex, task::LocalSet};
     use tonic::transport::Server;
 
-    use crate::{debug_stats::SharedDebugStats, voip_service::{pb::voip_service_server::VoipServiceServer, start_audio_playback, MyVoipService, SHOULD_STOP_FRAME_POLLER}};
+    use crate::{
+        debug_stats::SharedDebugStats,
+        voip_service::{
+            pb::voip_service_server::VoipServiceServer, start_audio_playback, MyVoipService,
+            SHOULD_STOP_FRAME_POLLER,
+        },
+    };
 
     env_logger::init();
     console_subscriber::init();
@@ -55,7 +59,7 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
                     SHOULD_STOP_FRAME_POLLER.store(true, std::sync::atomic::Ordering::Release);
 
                     // Print the debug stats.
-                    debug_stats.lock().unwrap().print();
+                    // debug_stats.lock().unwrap().print();
                 })
                 .await
                 .expect("Error shutting down grpc server");
@@ -63,6 +67,7 @@ pub fn entry_main() -> Result<(), Box<dyn std::error::Error>> {
 
         let _result = tokio::join!(grpc_server_future, local_set);
         // result.1.expect("Error closing tasks");
+        // let _result = tokio::join!(grpc_server_future);
 
         info!("Audio playback task finished.");
     });

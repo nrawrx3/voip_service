@@ -8,7 +8,19 @@ function Build-Service {
         Write-Host "Building the service..."
         cd $ProjectDir
         $env:RUSTFLAGS = "-C target-feature=+crt-static --cfg tokio_unstable"
-        cargo build --features windows-background-service
+        cargo build --features windows-background-service --release
+        if (-Not (Test-Path "$ProjectDir\target\debug\voip_service.exe")) {
+                Write-Error "Build failed. Ensure 'cargo' is installed and properly configured."
+                exit 1
+        }
+        Write-Host "Build completed successfully."
+}
+
+function Build-CLI {
+        Write-Host "Building the cli..."
+        cd $ProjectDir
+        $env:RUSTFLAGS = "-C target-feature=+crt-static --cfg tokio_unstable"
+        cargo build --features cli-mode --release
         if (-Not (Test-Path "$ProjectDir\target\debug\voip_service.exe")) {
                 Write-Error "Build failed. Ensure 'cargo' is installed and properly configured."
                 exit 1
@@ -79,23 +91,25 @@ function Delete-Service {
 # Menu options
 Write-Host "Choose an action:"
 Write-Host "1. Build Service"
-Write-Host "2. Create Service"
-Write-Host "3. Start Service"
-Write-Host "4. View Log"
-Write-Host "5. Stop Service"
-Write-Host "6. Delete Service"
-Write-Host "7. Exit"
+Write-Host "2. Build CLI"
+Write-Host "3. Create Service"
+Write-Host "4. Start Service"
+Write-Host "5. View Log"
+Write-Host "6. Stop Service"
+Write-Host "7. Delete Service"
+Write-Host "8. Exit"
 
 while ($true) {
         $choice = Read-Host "Enter your choice (1-7)"
         switch ($choice) {
                 1 { Build-Service }
-                2 { Create-Service }
-                3 { Start-Service }
-                4 { View-Log }
-                5 { Stop-Service }
-                6 { Delete-Service }
-                7 { break }
+                2 { Build-CLI }
+                3 { Create-Service }
+                4 { Start-Service }
+                5 { View-Log }
+                6 { Stop-Service }
+                7 { Delete-Service }
+                8 { break }
                 default { Write-Error "Invalid choice. Please enter a number between 1 and 7." }
         }
 }

@@ -88,7 +88,7 @@ pub enum CallState {
 
 impl Default for MyVoipService {
     fn default() -> Self {
-        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(100);
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(1024);
 
         MyVoipService {
             config: Config::from_env_variables(),
@@ -627,34 +627,88 @@ fn start_cpal_playback_thread(frame_receiver: tokio::sync::mpsc::Receiver<FrameA
     // Start a separate thread to handle the audio playback using cpal
     std::thread::spawn(move || {
         let mut frame_receiver = frame_receiver;
-
         let mut already_printed_data_length = false;
+        let mut last_frame_time = std::time::Instant::now();
 
         let stream = device
             .build_output_stream(
                 &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| loop {
-                    if let Ok(frame_array) = frame_receiver.try_recv() {
-                        if !already_printed_data_length {
-                            info!("cpal device buffer length = {}", data.len());
-                            already_printed_data_length = true;
-                        }
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    // Only process one frame per callback to prevent accumulation
 
-                        for (i, sample) in frame_array.data.iter().enumerate() {
-                            if i < data.len() {
-                                data[i] = *sample;
-                            }
-                        }
-                    } else {
-                        break;
+                    // let frame_receiver_res = frame_receiver.try_recv();
+
+                    // let mut frame_array = None;
+
+                    // match frame_receiver_res {
+                    //     Ok(received_frame_array) => {
+                    //         // if !already_printed_data_length {
+                    //         //     info!("cpal device buffer length = {}", data.len());
+                    //         //     already_printed_data_length = true;
+                    //         // }
+
+                    //         frame_array = Some(received_frame_array);
+                    //     }
+                    //     Err(_e) => {
+                    //         // info!("Error receiving frame: {}", e);
+                    //     }
+                    // }
+
+                    // if let Some(frame_array) = frame_array {
+                    //     // Copy samples into the output buffer
+                    //     // info!(
+                    //     //     "cpal: Copying frame of length {} into data buffer of length {}",
+                    //     //     frame_array.data.len(),
+                    //     //     data.len()
+                    //     // );
+
+                    //     for (i, sample) in frame_array.data.iter().enumerate() {
+                    //         if i < data.len() {
+                    //             data[i] = *sample;
+                    //         }
+                    //     }
+                    // } else {
+                    //     // Fill the buffer with zeros
+                    //     data.fill(0.0);
+                    // }
+
+                    // if let Ok(frame_array) = frame_receiver.try_recv() {
+                    //     if !already_printed_data_length {
+                    //         info!("cpal device buffer length = {}", data.len());
+                    //         already_printed_data_length = true;
+                    //     }
+
+                    //     // Copy samples into the output buffer
+                    //     info!(
+                    //         "cpal: Copying frame of length {} into data buffer of length {}",
+                    //         frame_array.data.len(),
+                    //         data.len()
+                    //     );
+                    //     for (i, sample) in frame_array.data.iter().enumerate() {
+                    //         if i < data.len() {
+                    //             data[i] = *sample;
+                    //         }
+                    //     }
+                    //     // frame_array is automatically dropped here when it goes out of scope
+                    // } else {
+                    //     // If we're falling behind, skip frames to catch up
+                    //     if last_frame_time.elapsed() > std::time::Duration::from_millis(50) {
+                    //         while frame_receiver.try_recv().is_ok() {
+                    //             // Skip frames until we're caught up
+                    //         }
+                    //         last_frame_time = std::time::Instant::now();
+                    //     }
+                    // }
+
+                    // // Experiment. Just fill the buffer with zeros. No channel communication.
+                    for i in 0..data.len() {
+                        data[i] = 0.0;
                     }
                 },
-                move |err| {
-                    eprintln!("Error occurred on stream: {}", err);
-                },
-                None, // No timeout needed here
+                move |err| error!("Error in output stream: {:?}", err),
+                None,
             )
-            .unwrap();
+            .expect("Failed to build output stream");
 
         // Start the stream in the separate thread
         if let Err(err) = stream.play() {
@@ -902,75 +956,78 @@ impl SharedFrameCombiner {
     async fn keep_polling(
         &self,
         frame_sender: tokio::sync::mpsc::Sender<FrameArray>,
-        debug_stats: SharedDebugStats,
+        _debug_stats: SharedDebugStats,
     ) {
         let interval = tokio::time::interval(AUDIO_FRAME_POLL_INTERVAL);
         tokio::pin!(interval);
 
-        info!("Starting audio frame polling loop");
+        if true {
+            info!("Starting audio frame polling loop");
 
-        loop {
-            interval.as_mut().tick().await;
-
-            if SHOULD_STOP_FRAME_POLLER.load(atomic::Ordering::Relaxed) {
-                info!("Stopping audio frame polling loop");
-                break;
-            }
-
-            // info!("Polling for audio frames");
-
-            // Lock the state to access the audio streams
-            let mut self_guard = self.0.lock().expect("Failed to lock frame combiner");
-
-            // info!("Acquired lock for audio streams");
-
-            // Allocate a new mix buffer for mixing audio frames
+            // Create the mix buffer once, outside the loop
             let mut mix_buffer = FrameArray::new();
 
-            // Iterate over audio streams and poll for frames
-            for audio_stream in self_guard.audio_streams.iter_mut() {
-                // Poll for the next frame without blocking
-                let mut frame_future = audio_stream.next();
+            loop {
+                interval.as_mut().tick().await;
 
-                // Poll the future directly
-                let frame = poll_fn(|cx| Pin::new(&mut frame_future).poll(cx)).await;
-
-                // Process the frame if it exists
-                if let Some(frame) = frame {
-                    // Ensure the frame has the correct number of samples
-                    if frame.data.len() != (SAMPLES_PER_10_MS * 2) as usize {
-                        error!(
-                            "Received frame with {} samples, expected {}",
-                            frame.data.len(),
-                            SAMPLES_PER_10_MS * 2
-                        );
-                        continue;
-                    }
-
-                    // Add the frame to the mix buffer
-                    for (i, sample) in frame.data.iter().enumerate() {
-                        mix_buffer.data[i] += (*sample as f32) / i16::MAX as f32;
-                    }
-
-                    // Add to debug stats.
-                    debug_stats
-                        .lock()
-                        .unwrap()
-                        .add_unique_audio_packet_config(AudioPacketConfig {
-                            sample_rate: frame.sample_rate as usize,
-                            buffer_size_in_samples: frame.data.len() / frame.num_channels as usize,
-
-                            channels: frame.num_channels as usize,
-                        });
-                } else {
-                    // Handle the case where the stream has ended or timed out
-                    warn!("Audio stream ended or timed out");
+                if SHOULD_STOP_FRAME_POLLER.load(atomic::Ordering::Relaxed) {
+                    info!("Stopping audio frame polling loop");
+                    break;
                 }
-            }
 
-            // Send the mix buffer to the mixed frame producer
-            if let Err(e) = frame_sender.send(mix_buffer).await {
-                error!("Failed to send frame: {:?}", e);
+                // Lock the state to access the audio streams
+                let mut self_guard = self.0.lock().expect("Failed to lock frame combiner");
+
+                // Reset the mix buffer before processing new frames
+                mix_buffer.data.fill(0.0);
+
+                let mut mixed_at_least_one_frame = false;
+
+                // Iterate over audio streams and poll for frames
+                for audio_stream in self_guard.audio_streams.iter_mut() {
+                    // Poll for the next frame without blocking
+                    let mut frame_future = audio_stream.next();
+
+                    // Poll the future directly
+                    let frame = poll_fn(|cx| Pin::new(&mut frame_future).poll(cx)).await;
+
+                    // Process the frame if it exists
+                    if let Some(frame) = frame {
+                        info!("Received frame of length {}", frame.data.len());
+
+                        // Ensure the frame has the correct number of samples
+                        if frame.data.len() != (SAMPLES_PER_10_MS * 2) as usize {
+                            error!(
+                                "Received frame with {} samples, expected {}",
+                                frame.data.len(),
+                                SAMPLES_PER_10_MS * 2
+                            );
+                            continue;
+                        }
+
+                        // Add the frame to the mix buffer
+                        for (i, sample) in frame.data.iter().enumerate() {
+                            info!("Mixing frame {} of {}", i, frame.data.len());
+
+                            mix_buffer.data[i] += (*sample as f32) / i16::MAX as f32;
+                        }
+
+                        mixed_at_least_one_frame = true;
+                    } else {
+                        // Handle the case where the stream has ended or timed out
+                        warn!("Audio stream ended or timed out");
+                    }
+                }
+
+                // Send the mix buffer to the mixed frame producer
+                if mixed_at_least_one_frame {
+                    if let Err(e) = frame_sender.send(mix_buffer.clone()).await {
+                        error!("Failed to send frame: {:?}", e);
+                    }
+                }
+                // else {
+                //     info!("No frames to mix, not sending anything");
+                // }
             }
         }
     }
